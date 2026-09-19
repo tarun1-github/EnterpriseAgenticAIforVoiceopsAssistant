@@ -17,6 +17,7 @@ from app.analysis.evidence_builder import build_evidence_pack
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.correlation.engine import CorrelationEngine
+from app.devices.cucm import CUCMClient, CUCMTraceCollector
 from app.models.call_session import CallSession
 from app.models.event import DirectionEnum, ProtocolEnum, VoiceEvent
 from app.parsers.detector import detect_protocol
@@ -111,6 +112,11 @@ def get_correlation_engine() -> CorrelationEngine:
     return CorrelationEngine(anomaly_detector=detector)
 
 
+@st.cache_resource
+def get_cucm_client() -> CUCMClient:
+    return CUCMClient()
+
+
 def load_bundled_samples() -> List[tuple[str, str]]:
     """Load sample files bundled in repository."""
     sample_dir = ROOT_DIR / "sample_data"
@@ -143,8 +149,68 @@ def main():
         st.markdown(f"**Model:** `{settings.llm_model}`")
         st.markdown(f"**App Env:** `{settings.app_env}`")
 
-        cucm_status = "Configured" if settings.cucm_host else "Not connected (Local offline mode)"
+        cucm_status = "Configured" if settings.cucm_host else "Not configured"
         st.markdown(f"**CUCM Status:** `{cucm_status}`")
+
+        # CUCM Device Section
+        if settings.cucm_host:
+            st.markdown("---")
+            st.subheader("🖥️ CUCM Device")
+            cucm_client = get_cucm_client()
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔌 Test Connection", use_container_width=True):
+                    with st.spinner("Testing CUCM connection..."):
+                        try:
+                            cucm_client.connect()
+                            st.session_state["cucm_connected"] = True
+                            st.success("Connected!")
+                        except Exception as e:
+                            st.session_state["cucm_connected"] = False
+                            st.error(f"Failed: {e}")
+
+            with col2:
+                if st.button("🔌 Disconnect", use_container_width=True):
+                    try:
+                        cucm_client.disconnect()
+                        st.session_state["cucm_connected"] = False
+                        st.success("Disconnected")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+            if st.button("📋 Get Version", use_container_width=True):
+                with st.spinner("Retrieving CUCM version..."):
+                    try:
+                        if not cucm_client.is_connected():
+                            cucm_client.connect()
+                        version = cucm_client.get_version()
+                        st.session_state["cucm_version"] = version.to_dict()
+                        st.success(f"Version: {version.version}")
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+
+            if st.button("📁 Discover SDL Files", use_container_width=True):
+                with st.spinner("Discovering SDL trace files..."):
+                    try:
+                        if not cucm_client.is_connected():
+                            cucm_client.connect()
+                        files = cucm_client.list_sdl_files()
+                        st.session_state["cucm_sdl_files"] = [f.to_dict() for f in files]
+                        st.success(f"Found {len(files)} SDL file(s)")
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+
+            if st.button("🩺 Run Diagnostic", use_container_width=True):
+                with st.spinner("Running CUCM diagnostic..."):
+                    try:
+                        if not cucm_client.is_connected():
+                            cucm_client.connect()
+                        diag = cucm_client.run_diagnostic()
+                        st.session_state["cucm_diagnostic"] = diag
+                        st.success(f"Diagnostic: {diag['overall']}")
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
 
         st.markdown("---")
         st.subheader("Quick Actions")
@@ -179,7 +245,7 @@ def main():
     )
 
     # Ingestion Tabs
-    tab_upload, tab_sessions, tab_timeline, tab_protocols, tab_inspector, tab_architecture = st.tabs(
+    tab_upload, tab_sessions, tab_timeline, tab_protocols, tab_inspector, tab_architecture, tab_cucm = st.tabs(
         [
             "📁 Trace Upload",
             "📞 Call Sessions",
@@ -187,6 +253,7 @@ def main():
             "📊 Protocol View",
             "🔍 Event Inspector",
             "🏗️ Architecture & RCA",
+            "🖥️ CUCM Device",
         ]
     )
 
@@ -545,6 +612,121 @@ def main():
             "ℹ️ **Phase 1 Status**: Deterministic parsing, multi-signal call correlation, and rule-based anomaly detection are fully active.\n\n"
             "The **LangGraph Evidence-Driven RCA Agent** will receive the structured `EvidencePack` in the next milestone to reason over anomalies and recommend diagnostic next steps."
         )
+
+    # --- TAB 7: CUCM Device ---
+    with tab_cucm:
+        st.markdown("### CUCM Device Integration")
+        st.caption("Connect to live CUCM via SSH for version detection and SDL trace discovery.")
+
+        if not settings.cucm_host or not settings.cucm_username:
+            st.warning("⚠️ CUCM not configured. Set CUCM_HOST, CUCM_USERNAME, CUCM_PASSWORD in .env")
+        else:
+            cucm_client = get_cucm_client()
+
+            # Connection status
+            connected = st.session_state.get("cucm_connected", False)
+            status_color = "🟢" if connected else "🔴"
+            st.markdown(f"**Connection Status:** {status_color} {'Connected' if connected else 'Disconnected'}")
+
+            # Version info
+            if "cucm_version" in st.session_state:
+                ver = st.session_state["cucm_version"]
+                st.markdown("#### CUCM Version")
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.metric("Version", ver.get("version", "N/A"))
+                with c2:
+                    st.metric("Build", ver.get("build", "N/A"))
+                with c3:
+                    st.metric("Edition", ver.get("edition", "N/A"))
+                with st.expander("Raw Output"):
+                    st.code(ver.get("raw_output", ""))
+
+            # Diagnostic results
+            if "cucm_diagnostic" in st.session_state:
+                diag = st.session_state["cucm_diagnostic"]
+                st.markdown("#### Diagnostic Results")
+                for key, value in diag.items():
+                    if key == "overall":
+                        continue
+                    status = value.get("status", "UNKNOWN")
+                    details = value.get("details", "")
+                    icon = "✅" if status == "PASS" else "❌" if status == "FAIL" else "❓"
+                    st.markdown(f"{icon} **{key.replace('_', ' ').title()}**: {details}")
+
+                overall_icon = "✅" if diag.get("overall") == "READY" else "⚠️" if diag.get("overall") == "PARTIAL" else "❌"
+                st.markdown(f"**Overall: {overall_icon} {diag.get('overall', 'UNKNOWN')}**")
+
+            # SDL Files
+            if "cucm_sdl_files" in st.session_state:
+                files = st.session_state["cucm_sdl_files"]
+                st.markdown(f"#### SDL Trace Files ({len(files)} found)")
+
+                if files:
+                    df = pd.DataFrame(files)
+                    st.dataframe(
+                        df[["filename", "size_mb", "modified", "trace_type"]],
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "filename": st.column_config.TextColumn("Filename", width="large"),
+                            "size_mb": st.column_config.NumberColumn("Size (MB)", width="small"),
+                            "modified": st.column_config.TextColumn("Modified", width="medium"),
+                            "trace_type": st.column_config.TextColumn("Type", width="small"),
+                        },
+                    )
+
+                    # Collection section
+                    st.markdown("---")
+                    st.markdown("#### Collect Trace Files")
+                    st.caption("Downloads selected SDL files to local storage for analysis.")
+
+                    selected_files = st.multiselect(
+                        "Select files to collect",
+                        options=[f["filename"] for f in files],
+                        default=[f["filename"] for f in files[:5]],
+                    )
+
+                    if st.button("📥 Collect Selected Files", type="primary"):
+                        if selected_files:
+                            collector = CUCMTraceCollector(client=cucm_client)
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            results = []
+
+                            def update_progress(result):
+                                results.append(result)
+                                status_text.text(f"Collected: {result.filename} ({'✅' if result.success else '❌'})")
+
+                            with st.spinner(f"Collecting {len(selected_files)} file(s)..."):
+                                collected = collector.collect_multiple(
+                                    selected_files,
+                                    progress_callback=update_progress,
+                                )
+                                progress_bar.progress(1.0)
+
+                            success_count = sum(1 for r in collected if r.success)
+                            st.success(f"Collected {success_count}/{len(collected)} files successfully")
+
+                            # Auto-ingest collected files
+                            if success_count > 0:
+                                if st.button("🔄 Ingest Collected Traces"):
+                                    ingestion_engine = get_ingestion_engine()
+                                    correlation_engine = get_correlation_engine()
+                                    all_events = []
+                                    for result in collected:
+                                        if result.success and result.local_path:
+                                            content = result.local_path.read_text(encoding="utf-8", errors="replace")
+                                            events = ingestion_engine.ingest_content(content, source=result.filename)
+                                            all_events.extend(events)
+
+                                    sessions = correlation_engine.correlate(all_events)
+                                    st.session_state["parsed_events"] = all_events
+                                    st.session_state["correlated_sessions"] = sessions
+                                    st.success(f"Ingested {len(all_events)} events into {len(sessions)} session(s)")
+                                    st.rerun()
+                else:
+                    st.info("No SDL trace files found in the default directory.")
 
 
 if __name__ == "__main__":

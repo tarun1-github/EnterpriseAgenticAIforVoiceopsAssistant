@@ -50,7 +50,13 @@ class Settings(BaseSettings):
     cucm_password: Optional[SecretStr] = Field(default=None, description="CUCM Application password")
     cucm_verify_ssl: bool = Field(default=False, description="Verify CUCM TLS certificate")
 
-    # Cisco Voice Gateway (Reserved for future live connectivity)
+    # Cisco CUCM SSH/CLI Configuration (for trace collection)
+    cucm_ssh_port: int = Field(default=22, description="CUCM SSH port")
+    cucm_ssh_timeout: int = Field(default=30, description="SSH connection timeout (seconds)")
+    cucm_command_timeout: int = Field(default=60, description="CLI command execution timeout (seconds)")
+    cucm_prompt_timeout: int = Field(default=15, description="Prompt detection timeout (seconds)")
+
+    # Cisco Voice Gateway (Reserved for future live integration)
     gateway_host: Optional[str] = Field(default=None, description="Voice Gateway IP or FQDN")
     gateway_username: Optional[str] = Field(default=None, description="Gateway SSH user")
     gateway_password: Optional[SecretStr] = Field(default=None, description="Gateway SSH password")
