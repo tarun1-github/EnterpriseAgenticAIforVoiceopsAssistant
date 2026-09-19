@@ -8,11 +8,10 @@ Netmiko is chosen because:
 - Properly handles SSH negotiation and authentication delays
 
 Device Type Selection:
-- CUCM CLI presents an "admin:" prompt (similar to Cisco IOS privileged exec)
-- "cisco_ios" device type handles prompt detection via base_prompt pattern
-- Netmiko's find_prompt() detects the trailing prompt characters
-- Using "cisco_ios" with fast_cli=False and proper timeouts ensures
-  delayed authentication prompts and CUCM CLI prompts are handled correctly
+- CUCM CLI presents an "admin:" prompt (NOT Cisco IOS # or >)
+- "cisco_ios" device type expects IOS-style prompts and FAILS on "admin:"
+- Use "generic" device type with explicit prompt pattern "admin:"
+- Netmiko's find_prompt() with custom prompt pattern detects "admin:"
 """
 
 from abc import ABC, abstractmethod
@@ -83,10 +82,13 @@ class NetmikoTransport(CUCMTransport):
 
     Handles:
     - Delayed password prompt via Netmiko's connection logic (auth_timeout, banner_timeout)
-    - Delayed CUCM CLI prompt via expect_string and find_prompt()
+    - CUCM CLI prompt "admin:" via explicit prompt pattern
     - Command timeouts (read_timeout_override, session_timeout)
     - Pagination (set cli pagination off)
     """
+
+    # CUCM CLI prompt pattern - matches "admin:" with optional whitespace
+    CUCM_PROMPT_PATTERN = r"admin:"
 
     def __init__(self, config: TransportConfig):
         self.config = config
@@ -106,10 +108,10 @@ class NetmikoTransport(CUCMTransport):
         except ImportError:
             raise CUCMConnectionError("Netmiko not installed. Run: pip install netmiko")
 
-        # Use cisco_ios device type - CUCM CLI uses "admin:" prompt similar to IOS privileged mode
-        # fast_cli=False ensures proper prompt detection for non-standard prompts
+        # Use "generic" device type with explicit prompt pattern for CUCM "admin:"
+        # cisco_ios fails because it expects "#" or ">" prompt, not "admin:"
         device = {
-            "device_type": "cisco_ios",
+            "device_type": "generic",
             "host": self.config.host,
             "port": self.config.port,
             "username": self.config.username,
@@ -122,6 +124,8 @@ class NetmikoTransport(CUCMTransport):
             "read_timeout_override": self.config.command_timeout,
             "global_delay_factor": 1.5,
             "fast_cli": False,
+            # Explicit prompt pattern for CUCM
+            "prompt": self.CUCM_PROMPT_PATTERN,
         }
 
         try:
@@ -132,7 +136,7 @@ class NetmikoTransport(CUCMTransport):
             # Disable pagination
             self._disable_pagination()
 
-            # Detect base prompt (e.g., "admin:")
+            # Detect base prompt (should be "admin:")
             self._base_prompt = self._connection.find_prompt().strip()
             if not self._base_prompt:
                 raise CUCMPromptError("Failed to detect CUCM CLI prompt after connection")
@@ -165,7 +169,7 @@ class NetmikoTransport(CUCMTransport):
         try:
             output = self._connection.send_command(
                 "set cli pagination off",
-                expect_string=r"[#>:]",
+                expect_string=self.CUCM_PROMPT_PATTERN,
                 read_timeout=self.config.prompt_timeout,
             )
             logger.debug("Pagination disabled: %s", output.strip())
