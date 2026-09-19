@@ -1,0 +1,81 @@
+*Sep 19 14:22:01.123: ISDN Se0/2/0:23 Q931: RX <- SETUP pd = 8  callref = 0x0082
+    Sending Complete
+    Bearer Capability i = 0x8890
+    Channel ID i = 0xA98381
+        Exclusive, Channel 1
+    Calling Party Number i = 0x0081, '2001'
+    Called Party Number i = 0x80, '5001'
+
+*Sep 19 14:22:01.140: ISDN Se0/2/0:23 Q931: TX -> CALL_PROC pd = 8  callref = 0x8082
+    Channel ID i = 0xA98381
+        Exclusive, Channel 1
+
+*Sep 19 14:22:01.160: MGCP Packet received from 10.1.1.10:2427--->
+CRCX 1001 S0/SU0/DS1-0/1@vg224.cisco.com MGCP 0.1
+C: D000000001
+L: p:20, a:PCMU, s:off
+M: recvonly
+X: 1
+<---
+
+*Sep 19 14:22:01.170: MGCP Packet sent to 10.1.1.10:2427--->
+200 1001 OK
+I: 1
+v=0
+c=IN IP4 10.1.1.20
+m=audio 16402 RTP/AVP 0
+<---
+
+*Sep 19 14:22:01.180: //123/A1B2C3D4E5F6/SIP/Msg/ccsipDisplayMsg:
+Received:
+INVITE sip:5001@10.1.1.10:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.1.1.20:5060;branch=z9hG4bK123456
+From: <sip:2001@10.1.1.20>;tag=12345
+To: <sip:5001@10.1.1.10>
+Call-ID: 456789@10.1.1.20
+CSeq: 101 INVITE
+Contact: <sip:2001@10.1.1.20:5060>
+Content-Type: application/sdp
+Content-Length: 150
+
+v=0
+c=IN IP4 10.1.1.20
+m=audio 16400 RTP/AVP 0
+<---
+
+*Sep 19 14:22:01.200: //123/A1B2C3D4E5F6/SIP/Msg/ccsipDisplayMsg:
+Sent:
+SIP/2.0 180 Ringing
+Via: SIP/2.0/UDP 10.1.1.20:5060;branch=z9hG4bK123456
+From: <sip:2001@10.1.1.20>;tag=12345
+To: <sip:5001@10.1.1.10>;tag=67890
+Call-ID: 456789@10.1.1.20
+CSeq: 101 INVITE
+<---
+
+*Sep 19 14:22:01.205: ISDN Se0/2/0:23 Q931: TX -> ALERTING pd = 8  callref = 0x8082
+    Progress Ind i = 0x8188 - In-band info or appropriate now available
+
+*Sep 19 14:22:03.450: //123/A1B2C3D4E5F6/SIP/Msg/ccsipDisplayMsg:
+Sent:
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.1.1.20:5060;branch=z9hG4bK123456
+From: <sip:2001@10.1.1.20>;tag=12345
+To: <sip:5001@10.1.1.10>;tag=67890
+Call-ID: 456789@10.1.1.20
+CSeq: 101 INVITE
+<---
+
+*Sep 19 14:22:03.452: ISDN Se0/2/0:23 Q931: TX -> CONNECT pd = 8  callref = 0x8082
+
+*Sep 19 14:22:03.460: ISDN Se0/2/0:23 Q931: RX <- CONNECT_ACK pd = 8  callref = 0x0082
+
+*Sep 19 14:22:03.470: //123/A1B2C3D4E5F6/SIP/Msg/ccsipDisplayMsg:
+Received:
+ACK sip:5001@10.1.1.10:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.1.1.20:5060;branch=z9hG4bK123457
+From: <sip:2001@10.1.1.20>;tag=12345
+To: <sip:5001@10.1.1.10>;tag=67890
+Call-ID: 456789@10.1.1.20
+CSeq: 101 ACK
+<---

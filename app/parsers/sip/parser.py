@@ -145,13 +145,18 @@ class SIPParser(BaseParser):
         resp_match = SIP_RESPONSE_LINE.match(start_line)
 
         cause_code = None
+        sip_method = None
+        sip_response_code = None
+
         if req_match:
             msg_type = req_match.group("method").upper()
+            sip_method = msg_type
         elif resp_match:
             code = resp_match.group("code")
             reason = resp_match.group("reason").strip()
             msg_type = f"{code} {reason}".strip()
             cause_code = f"SIP {code} {reason}".strip()
+            sip_response_code = int(code)
         else:
             return None
 
@@ -162,9 +167,15 @@ class SIPParser(BaseParser):
             call_id = m_cid.group("val").strip()
 
         transaction_id = None
+        cseq_num = None
+        cseq_method = None
         m_cseq = CSEQ_PATTERN.search(raw_block)
         if m_cseq:
-            transaction_id = f"{m_cseq.group('seq')} {m_cseq.group('method')}"
+            cseq_num = int(m_cseq.group("seq"))
+            cseq_method = m_cseq.group("method").upper()
+            transaction_id = f"{cseq_num} {cseq_method}"
+            if not sip_method:
+                sip_method = cseq_method
 
         calling_number = None
         m_from = FROM_PATTERN.search(raw_block)
@@ -190,6 +201,13 @@ class SIPParser(BaseParser):
 
         # Extract SDP metadata
         metadata: Dict[str, Any] = {}
+        if sip_method:
+            metadata["sip_method"] = sip_method
+        if sip_response_code is not None:
+            metadata["sip_response_code"] = sip_response_code
+        if cseq_num is not None:
+            metadata["cseq_number"] = cseq_num
+
         m_conn = SDP_CONNECTION.search(raw_block)
         if m_conn:
             metadata["rtp_ip"] = m_conn.group("ip")
@@ -203,9 +221,11 @@ class SIPParser(BaseParser):
         if codecs:
             metadata["codecs"] = [f"{enc}/{clock} ({p})" for p, enc, clock in codecs]
 
+        raw_ts = prefix_info.get("timestamp")
+
         return VoiceEvent(
-            timestamp=prefix_info.get("timestamp"),
-            timestamp_raw=prefix_info.get("timestamp"),
+            timestamp=raw_ts,
+            timestamp_raw=raw_ts,
             protocol=ProtocolEnum.SIP,
             direction=prefix_info.get("direction", DirectionEnum.UNKNOWN),
             source=source,

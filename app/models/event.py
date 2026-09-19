@@ -1,9 +1,11 @@
 """Common Event Model (VoiceEvent) for multi-protocol call correlation."""
 
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Optional
 from uuid import uuid4
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from app.core.timestamps import parse_cisco_timestamp
 
 
 class ProtocolEnum(str, Enum):
@@ -29,7 +31,7 @@ class VoiceEvent(BaseModel):
     """Normalized, protocol-agnostic event model representing a single signaling unit."""
 
     id: str = Field(default_factory=lambda: uuid4().hex, description="Globally unique event ID")
-    timestamp: Optional[str] = Field(default=None, description="Normalized or extracted timestamp")
+    timestamp: Optional[datetime] = Field(default=None, description="Normalized datetime if date is available")
     timestamp_raw: Optional[str] = Field(default=None, description="Original verbatim timestamp string")
     protocol: ProtocolEnum = Field(default=ProtocolEnum.UNKNOWN, description="Signaling protocol")
     direction: DirectionEnum = Field(default=DirectionEnum.UNKNOWN, description="RX / TX / INTERNAL / UNKNOWN")
@@ -63,11 +65,38 @@ class VoiceEvent(BaseModel):
     raw: str = Field(..., description="Exact raw log block for this event")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Extensible protocol-specific metadata")
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_timestamps(cls, data: Any) -> Any:
+        """Handle string or datetime timestamps gracefully before Pydantic validation."""
+        if isinstance(data, dict):
+            raw_ts = data.get("timestamp_raw") or data.get("timestamp")
+            if isinstance(data.get("timestamp"), str):
+                dt, clean_str = parse_cisco_timestamp(data["timestamp"])
+                data["timestamp"] = dt
+                if not data.get("timestamp_raw"):
+                    data["timestamp_raw"] = clean_str
+            elif isinstance(data.get("timestamp"), datetime):
+                if not data.get("timestamp_raw"):
+                    data["timestamp_raw"] = data["timestamp"].isoformat()
+            elif raw_ts and isinstance(raw_ts, str):
+                dt, clean_str = parse_cisco_timestamp(raw_ts)
+                data["timestamp"] = dt
+                if not data.get("timestamp_raw"):
+                    data["timestamp_raw"] = clean_str
+        return data
+
     def to_summary_dict(self) -> Dict[str, Any]:
         """Convert event to a concise flat dictionary suitable for UI tables and logs."""
+        formatted_ts = "N/A"
+        if self.timestamp:
+            formatted_ts = self.timestamp.strftime("%b %d %H:%M:%S.%f")[:-3]
+        elif self.timestamp_raw:
+            formatted_ts = self.timestamp_raw
+
         return {
             "id": self.id[:8],
-            "timestamp": self.timestamp or self.timestamp_raw or "N/A",
+            "timestamp": formatted_ts,
             "protocol": self.protocol.value,
             "direction": self.direction.value,
             "message": self.message_type,

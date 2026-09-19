@@ -12,8 +12,12 @@ if str(ROOT_DIR) not in sys.path:
 
 import pandas as pd
 import streamlit as st
+from app.analysis.anomaly_detector import AnomalyDetector
+from app.analysis.evidence_builder import build_evidence_pack
 from app.core.config import get_settings
 from app.core.logging import setup_logging
+from app.correlation.engine import CorrelationEngine
+from app.models.call_session import CallSession
 from app.models.event import DirectionEnum, ProtocolEnum, VoiceEvent
 from app.parsers.detector import detect_protocol
 from app.parsers.ingestion import TraceIngestionEngine
@@ -44,23 +48,14 @@ st.markdown(
         color: #94A3B8;
         margin-bottom: 1.5rem;
     }
-    .metric-card {
-        background: #1E293B;
-        border: 1px solid #334155;
-        border-radius: 8px;
-        padding: 1rem;
-        text-align: center;
-    }
-    .metric-title {
-        font-size: 0.85rem;
-        color: #94A3B8;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-    }
-    .metric-value {
-        font-size: 1.8rem;
-        font-weight: 700;
-        color: #38BDF8;
+    .disclaimer-banner {
+        background-color: #1E293B;
+        border-left: 4px solid #38BDF8;
+        padding: 0.75rem 1rem;
+        margin-bottom: 1.2rem;
+        border-radius: 4px;
+        color: #CBD5E1;
+        font-size: 0.95rem;
     }
     .call-flow-diagram {
         background: #0F172A;
@@ -73,10 +68,32 @@ st.markdown(
         line-height: 1.6;
         margin-bottom: 1.5rem;
     }
-    .badge-isdn { background-color: #3B82F6; color: white; padding: 2px 8px; border-radius: 4px; font-weight: bold; }
-    .badge-sip { background-color: #10B981; color: white; padding: 2px 8px; border-radius: 4px; font-weight: bold; }
-    .badge-mgcp { background-color: #F59E0B; color: white; padding: 2px 8px; border-radius: 4px; font-weight: bold; }
-    .badge-cucm { background-color: #8B5CF6; color: white; padding: 2px 8px; border-radius: 4px; font-weight: bold; }
+    .anomaly-card-error {
+        background: #450A0A;
+        border: 1px solid #991B1B;
+        border-radius: 6px;
+        padding: 0.75rem 1rem;
+        margin-bottom: 0.5rem;
+        color: #FECACA;
+    }
+    .anomaly-card-warning {
+        background: #451A03;
+        border: 1px solid #9A3412;
+        border-radius: 6px;
+        padding: 0.75rem 1rem;
+        margin-bottom: 0.5rem;
+        color: #FED7AA;
+    }
+    .evidence-tag {
+        display: inline-block;
+        background: #1E3A5F;
+        border: 1px solid #2563EB;
+        color: #93C5FD;
+        padding: 3px 8px;
+        border-radius: 4px;
+        margin: 2px 4px 2px 0;
+        font-size: 0.85rem;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -84,8 +101,14 @@ st.markdown(
 
 
 @st.cache_resource
-def get_engine() -> TraceIngestionEngine:
+def get_ingestion_engine() -> TraceIngestionEngine:
     return TraceIngestionEngine()
+
+
+@st.cache_resource
+def get_correlation_engine() -> CorrelationEngine:
+    detector = AnomalyDetector()
+    return CorrelationEngine(anomaly_detector=detector)
 
 
 def load_bundled_samples() -> List[tuple[str, str]]:
@@ -96,6 +119,7 @@ def load_bundled_samples() -> List[tuple[str, str]]:
         "isdn/sample_isdn_call.txt",
         "sip/sample_sip_call.txt",
         "mgcp/sample_mgcp_call.txt",
+        "mixed/sample_mixed_gateway.txt",
     ]:
         p = sample_dir / rel_path
         if p.exists():
@@ -105,7 +129,8 @@ def load_bundled_samples() -> List[tuple[str, str]]:
 
 def main():
     settings = get_settings()
-    engine = get_engine()
+    ingestion_engine = get_ingestion_engine()
+    correlation_engine = get_correlation_engine()
 
     # Sidebar: System Status & Configuration
     with st.sidebar:
@@ -118,36 +143,51 @@ def main():
         st.markdown(f"**Model:** `{settings.llm_model}`")
         st.markdown(f"**App Env:** `{settings.app_env}`")
 
-        cucm_status = "Configured" if settings.cucm_host else "Not connected (Phase 1 local)"
+        cucm_status = "Configured" if settings.cucm_host else "Not connected (Local offline mode)"
         st.markdown(f"**CUCM Status:** `{cucm_status}`")
 
         st.markdown("---")
         st.subheader("Quick Actions")
-        if st.button("📥 Load Bundled Samples", use_container_width=True, help="Load synthetic ISDN, SIP & MGCP traces"):
+        if st.button("📥 Load Bundled Samples", use_container_width=True, help="Load synthetic ISDN, SIP, MGCP & mixed traces"):
             samples = load_bundled_samples()
             all_events: List[VoiceEvent] = []
             for name, content in samples:
-                events = engine.ingest_content(content, source=name)
+                events = ingestion_engine.ingest_content(content, source=name)
                 all_events.extend(events)
+
             st.session_state["parsed_events"] = all_events
             st.session_state["uploaded_file_names"] = [s[0] for s in samples]
-            st.success(f"Loaded {len(samples)} sample trace files ({len(all_events)} events)!")
+
+            # Correlate sessions
+            with st.spinner("Correlating multi-protocol calls..."):
+                sessions = correlation_engine.correlate(all_events)
+                st.session_state["correlated_sessions"] = sessions
+
+            st.success(f"Loaded {len(samples)} trace files ({len(all_events)} events, {len(sessions)} correlated sessions)!")
 
         if st.button("🗑️ Clear All Traces", use_container_width=True):
             st.session_state.pop("parsed_events", None)
             st.session_state.pop("uploaded_file_names", None)
+            st.session_state.pop("correlated_sessions", None)
             st.rerun()
 
     # Main Application Header
     st.markdown('<div class="main-header">VoiceOps AI — Call Signaling Diagnostic Center</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="sub-header">Deterministic parsing & multi-protocol trace analysis for Cisco ISDN, SIP, MGCP, and CUCM environments.</div>',
+        '<div class="sub-header">Deterministic parsing, multi-signal call correlation, and signaling anomaly detection for Cisco Voice.</div>',
         unsafe_allow_html=True,
     )
 
     # Ingestion Tabs
-    tab_upload, tab_timeline, tab_protocols, tab_inspector, tab_architecture = st.tabs(
-        ["📁 Trace Upload", "⏱️ Call Timeline", "📊 Protocol View", "🔍 Event Inspector", "🏗️ Architecture & RCA"]
+    tab_upload, tab_sessions, tab_timeline, tab_protocols, tab_inspector, tab_architecture = st.tabs(
+        [
+            "📁 Trace Upload",
+            "📞 Call Sessions",
+            "⏱️ Unified Timeline",
+            "📊 Protocol View",
+            "🔍 Event Inspector",
+            "🏗️ Architecture & RCA",
+        ]
     )
 
     # --- TAB 1: Trace Upload ---
@@ -155,7 +195,7 @@ def main():
         st.markdown("### Upload Cisco Trace Log Files")
         st.markdown(
             "Upload one or more raw Cisco debug files (`.txt`). Supported signaling traces include "
-            "`debug isdn q931`, `debug ccsip messages`, `debug mgcp packets`, and `CUCM SDL/SDI`."
+            "`debug isdn q931`, `debug ccsip messages`, `debug mgcp packets`, mixed gateway logs, and `CUCM SDL/SDI`."
         )
 
         uploaded_files = st.file_uploader(
@@ -165,22 +205,25 @@ def main():
             help="Upload raw router/CUCM trace text dumps",
         )
 
-        if st.button("🚀 Ingest & Parse Traces", type="primary", use_container_width=False):
+        if st.button("🚀 Ingest & Correlate Traces", type="primary", use_container_width=False):
             if uploaded_files:
                 combined_events: List[VoiceEvent] = []
                 file_names: List[str] = []
-                with st.spinner("Executing deterministic parsers..."):
+                with st.spinner("Executing deterministic parsers and correlation engine..."):
                     for uf in uploaded_files:
                         content = uf.read().decode("utf-8", errors="replace")
                         file_names.append(uf.name)
-                        events = engine.ingest_content(content, source=uf.name)
+                        events = ingestion_engine.ingest_content(content, source=uf.name)
                         combined_events.extend(events)
+
+                    sessions = correlation_engine.correlate(combined_events)
 
                 st.session_state["parsed_events"] = combined_events
                 st.session_state["uploaded_file_names"] = file_names
-                st.success(f"Successfully processed {len(uploaded_files)} file(s). Detected {len(combined_events)} signaling events.")
+                st.session_state["correlated_sessions"] = sessions
+                st.success(f"Processed {len(uploaded_files)} file(s). Extracted {len(combined_events)} events into {len(sessions)} CallSession(s).")
             else:
-                st.warning("Please select at least one file or use 'Load Bundled Samples' from the sidebar.")
+                st.warning("Please select at least one file or use 'Load Bundled Samples' in the sidebar.")
 
         # Show current uploaded files status
         if "uploaded_file_names" in st.session_state:
@@ -188,8 +231,9 @@ def main():
             for fname in st.session_state["uploaded_file_names"]:
                 st.markdown(f"- 📄 `{fname}`")
 
-    # Get events from session state
+    # Retrieve events & sessions from session state
     events: List[VoiceEvent] = st.session_state.get("parsed_events", [])
+    sessions: List[CallSession] = st.session_state.get("correlated_sessions", [])
 
     if not events:
         st.info("💡 No trace events loaded yet. Upload files above or click **'Load Bundled Samples'** in the left sidebar to explore.")
@@ -200,36 +244,174 @@ def main():
     with col1:
         st.metric("Total Events", len(events))
     with col2:
+        st.metric("Correlated Sessions", len(sessions))
+    with col3:
         isdn_count = sum(1 for e in events if e.protocol == ProtocolEnum.ISDN)
         st.metric("ISDN Q.931", isdn_count)
-    with col3:
+    with col4:
         sip_count = sum(1 for e in events if e.protocol == ProtocolEnum.SIP)
         st.metric("SIP Messages", sip_count)
-    with col4:
+    with col5:
         mgcp_count = sum(1 for e in events if e.protocol == ProtocolEnum.MGCP)
         st.metric("MGCP Packets", mgcp_count)
-    with col5:
-        unique_call_ids = len({e.call_id for e in events if e.call_id} | {e.call_reference for e in events if e.call_reference})
-        st.metric("Identified Call Legs", unique_call_ids)
 
     st.markdown("---")
 
-    # --- TAB 2: Call Timeline ---
-    with tab_timeline:
-        st.markdown("### Unified Chronological Timeline")
+    # --- TAB 2: Call Sessions View ---
+    with tab_sessions:
+        st.markdown(
+            '<div class="disclaimer-banner">ℹ️ <strong>Deterministic analysis — LLM RCA not enabled in this phase.</strong> All sessions and anomalies below are derived purely from multi-signal deterministic rules.</div>',
+            unsafe_allow_html=True,
+        )
 
-        # Filters
+        st.markdown("### Correlated Voice Call Sessions")
+
+        if not sessions:
+            st.warning("No call sessions correlated.")
+        else:
+            session_rows = [s.to_summary_dict() for s in sessions]
+            df_sessions = pd.DataFrame(session_rows)
+            st.dataframe(
+                df_sessions,
+                use_container_width=True,
+                column_config={
+                    "session_id": st.column_config.TextColumn("Session ID", width="small"),
+                    "architecture": st.column_config.TextColumn("Architecture", width="medium"),
+                    "calling": st.column_config.TextColumn("Calling (ANI)", width="small"),
+                    "called": st.column_config.TextColumn("Called (DNIS)", width="small"),
+                    "start": st.column_config.TextColumn("Start Time", width="small"),
+                    "end": st.column_config.TextColumn("End Time", width="small"),
+                    "protocols": st.column_config.TextColumn("Protocols", width="medium"),
+                    "event_count": st.column_config.NumberColumn("Events", width="small"),
+                    "confidence": st.column_config.TextColumn("Confidence", width="small"),
+                    "anomalies": st.column_config.NumberColumn("Anomalies", width="small"),
+                },
+                hide_index=True,
+            )
+
+            st.markdown("---")
+            st.markdown("### Session Drill-Down Inspector")
+
+            session_labels = [
+                f"{s.session_id} | {s.architecture.value} | ANI: {s.calling_number or '-'} ➔ DNIS: {s.called_number or '-'} ({len(s.events)} events, {len(s.anomalies)} anomalies)"
+                for s in sessions
+            ]
+            selected_sess_idx = st.selectbox(
+                "Select Session to Inspect",
+                range(len(sessions)),
+                format_func=lambda i: session_labels[i],
+            )
+            selected_session = sessions[selected_sess_idx]
+
+            # Session Header Info
+            mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+            with mcol1:
+                st.markdown(f"**Architecture:** `{selected_session.architecture.value}`")
+            with mcol2:
+                st.markdown(f"**Correlation Confidence:** `{int(selected_session.correlation_confidence * 100)}%`")
+            with mcol3:
+                st.markdown(f"**Call Reference(s):** `{', '.join(selected_session.isdn_call_references) or 'None'}`")
+            with mcol4:
+                st.markdown(f"**SIP Call-ID(s):** `{', '.join(selected_session.sip_call_ids) or 'None'}`")
+
+            # Drill-Down Sub-Tabs
+            s_tab_timeline, s_tab_protocols, s_tab_evidence, s_tab_anomalies, s_tab_pack = st.tabs(
+                [
+                    "⏱️ Unified Call Timeline",
+                    "📊 Protocols",
+                    "🔗 Correlation Evidence",
+                    "⚠️ Detected Anomalies",
+                    "📦 JSON Evidence Pack",
+                ]
+            )
+
+            # Sub-Tab 1: Unified Timeline for this session
+            with s_tab_timeline:
+                s_events = [ev.to_summary_dict() for ev in selected_session.events]
+                if s_events:
+                    st.dataframe(pd.DataFrame(s_events), use_container_width=True, hide_index=True)
+
+            # Sub-Tab 2: Protocol Breakdown
+            with s_tab_protocols:
+                p_col1, p_col2, p_col3 = st.columns(3)
+                with p_col1:
+                    st.markdown("##### 🔵 ISDN Q.931 Events")
+                    s_isdn = [e for e in selected_session.events if e.protocol == ProtocolEnum.ISDN]
+                    if s_isdn:
+                        for e in s_isdn:
+                            icon = "📥" if e.direction == DirectionEnum.INBOUND else "📤"
+                            st.markdown(f"{icon} `{e.timestamp_raw or 'No TS'}` **{e.message_type}** `ref={e.call_reference}`")
+                    else:
+                        st.caption("No ISDN events in this session.")
+
+                with p_col2:
+                    st.markdown("##### 🟠 MGCP Packets")
+                    s_mgcp = [e for e in selected_session.events if e.protocol == ProtocolEnum.MGCP]
+                    if s_mgcp:
+                        for e in s_mgcp:
+                            icon = "📥" if e.direction == DirectionEnum.INBOUND else "📤"
+                            st.markdown(f"{icon} `{e.timestamp_raw or 'No TS'}` **{e.message_type}** `trans={e.transaction_id}`")
+                    else:
+                        st.caption("No MGCP events in this session.")
+
+                with p_col3:
+                    st.markdown("##### 🟢 SIP Messages")
+                    s_sip = [e for e in selected_session.events if e.protocol == ProtocolEnum.SIP]
+                    if s_sip:
+                        for e in s_sip:
+                            icon = "📥" if e.direction == DirectionEnum.INBOUND else "📤"
+                            st.markdown(f"{icon} `{e.timestamp_raw or 'No TS'}` **{e.message_type}**")
+                    else:
+                        st.caption("No SIP events in this session.")
+
+            # Sub-Tab 3: Correlation Evidence
+            with s_tab_evidence:
+                st.markdown("##### Signals Matched Across Protocols:")
+                if selected_session.correlation_evidence:
+                    for ev_item in selected_session.correlation_evidence:
+                        st.markdown(f"- 🔗 {ev_item}")
+                else:
+                    st.caption("Single initial event; no multi-signal correlation required.")
+
+            # Sub-Tab 4: Detected Anomalies
+            with s_tab_anomalies:
+                st.markdown("##### Deterministic Signaling Anomalies:")
+                if selected_session.anomalies:
+                    for anom in selected_session.anomalies:
+                        card_class = "anomaly-card-error" if anom.severity.value == "ERROR" else "anomaly-card-warning"
+                        st.markdown(
+                            f"""
+                            <div class="{card_class}">
+                                <strong>[{anom.protocol.value} | {anom.category.value}] {anom.severity.value}</strong><br/>
+                                {anom.description}<br/>
+                                <small>Expected: <code>{anom.expected_message or 'N/A'}</code></small>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.success("✅ No signaling anomalies detected in this session.")
+
+            # Sub-Tab 5: Evidence Pack JSON
+            with s_tab_pack:
+                st.markdown("##### Machine-Readable Evidence Pack (Structured for LLM Agent):")
+                pack = build_evidence_pack(selected_session)
+                st.json(pack.model_dump(mode="json"))
+
+    # --- TAB 3: Global Event Timeline ---
+    with tab_timeline:
+        st.markdown("### Unified Chronological Timeline (All Events)")
+
         f_col1, f_col2, f_col3 = st.columns(3)
         with f_col1:
             protocol_options = ["ALL"] + [p.value for p in ProtocolEnum if p != ProtocolEnum.UNKNOWN]
-            selected_proto = st.selectbox("Filter by Protocol", protocol_options)
+            selected_proto = st.selectbox("Filter by Protocol", protocol_options, key="t_proto")
         with f_col2:
             dir_options = ["ALL", "RX (Inbound)", "TX (Outbound)", "INTERNAL"]
-            selected_dir = st.selectbox("Filter by Direction", dir_options)
+            selected_dir = st.selectbox("Filter by Direction", dir_options, key="t_dir")
         with f_col3:
-            search_query = st.text_input("Search (Message, ANI, DNIS, Call-ID, Cause)", "")
+            search_query = st.text_input("Search (Message, ANI, DNIS, Call-ID, Cause)", "", key="t_search")
 
-        # Apply filtering
         filtered_events = events
         if selected_proto != "ALL":
             filtered_events = [e for e in filtered_events if e.protocol.value == selected_proto]
@@ -254,37 +436,16 @@ def main():
                 )
             ]
 
-        # Render Table
         table_rows = [e.to_summary_dict() for e in filtered_events]
         if table_rows:
-            df = pd.DataFrame(table_rows)
-            st.dataframe(
-                df,
-                use_container_width=True,
-                column_config={
-                    "id": st.column_config.TextColumn("Event ID", width="small"),
-                    "timestamp": st.column_config.TextColumn("Timestamp", width="medium"),
-                    "protocol": st.column_config.TextColumn("Protocol", width="small"),
-                    "direction": st.column_config.TextColumn("Direction", width="small"),
-                    "message": st.column_config.TextColumn("Signaling Message", width="medium"),
-                    "calling": st.column_config.TextColumn("Calling (ANI)", width="small"),
-                    "called": st.column_config.TextColumn("Called (DNIS)", width="small"),
-                    "call_ref": st.column_config.TextColumn("Call Ref", width="small"),
-                    "call_id": st.column_config.TextColumn("Call-ID", width="medium"),
-                    "cause": st.column_config.TextColumn("Cause / Status", width="medium"),
-                },
-                hide_index=True,
-            )
+            st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
         else:
             st.info("No events match the selected filters.")
 
-    # --- TAB 3: Protocol View ---
+    # --- TAB 4: Protocol View ---
     with tab_protocols:
-        st.markdown("### Protocol Summary Breakdown")
-
+        st.markdown("### Global Protocol Summary Breakdown")
         proto_cols = st.columns(3)
-
-        # ISDN Column
         with proto_cols[0]:
             st.markdown("#### 🔵 ISDN / Q.931")
             isdn_events = [e for e in events if e.protocol == ProtocolEnum.ISDN]
@@ -295,7 +456,6 @@ def main():
             else:
                 st.caption("No ISDN events detected.")
 
-        # MGCP Column
         with proto_cols[1]:
             st.markdown("#### 🟠 MGCP Packets")
             mgcp_events = [e for e in events if e.protocol == ProtocolEnum.MGCP]
@@ -306,7 +466,6 @@ def main():
             else:
                 st.caption("No MGCP events detected.")
 
-        # SIP Column
         with proto_cols[2]:
             st.markdown("#### 🟢 SIP Messages")
             sip_events = [e for e in events if e.protocol == ProtocolEnum.SIP]
@@ -317,27 +476,27 @@ def main():
             else:
                 st.caption("No SIP events detected.")
 
-    # --- TAB 4: Event Inspector ---
+    # --- TAB 5: Event Inspector ---
     with tab_inspector:
         st.markdown("### Detailed Event & Raw Trace Inspector")
         st.caption("Select an individual signaling event to view structured attributes and verbatim trace text.")
 
         if events:
             event_labels = [
-                f"[{i+1}/{len(events)}] {e.protocol.value} | {e.message_type} | {e.timestamp or 'No TS'} | {e.calling_number or ''}->{e.called_number or ''}"
+                f"[{i+1}/{len(events)}] {e.protocol.value} | {e.message_type} | {e.timestamp_raw or 'No TS'} | {e.calling_number or ''}->{e.called_number or ''}"
                 for i, e in enumerate(events)
             ]
             selected_idx = st.selectbox("Choose Event to Inspect", range(len(events)), format_func=lambda i: event_labels[i])
             sel_event = events[selected_idx]
 
             col_details, col_raw = st.columns([1, 1])
-
             with col_details:
                 st.markdown("#### Structured Event Attributes")
                 st.json(
                     {
                         "id": sel_event.id,
-                        "timestamp": sel_event.timestamp,
+                        "timestamp": sel_event.timestamp.isoformat() if sel_event.timestamp else None,
+                        "timestamp_raw": sel_event.timestamp_raw,
                         "protocol": sel_event.protocol.value,
                         "direction": sel_event.direction.value,
                         "message_type": sel_event.message_type,
@@ -360,9 +519,9 @@ def main():
                 st.markdown("#### Verbatim Raw Trace Block")
                 st.code(sel_event.raw, language="text")
 
-    # --- TAB 5: Architecture & RCA ---
+    # --- TAB 6: Architecture & RCA ---
     with tab_architecture:
-        st.markdown("### Call Architecture & Flow Progression")
+        st.markdown("### Call Architecture & Progression")
 
         st.markdown(
             """
@@ -373,7 +532,7 @@ def main():
             unsafe_allow_html=True,
         )
 
-        st.markdown("#### Detected Call Leg Alignment")
+        st.markdown("#### Detected Call Leg Distribution")
         st.markdown(
             f"""
             - **ISDN Ingress**: `{isdn_count}` signaling frame(s) identified on PRI interface.
@@ -383,9 +542,8 @@ def main():
         )
 
         st.info(
-            "ℹ️ **Phase 1 Step 1 Status**: Deterministic parsing & model extraction completed.\n\n"
-            "The **Multi-Protocol Correlation Engine (Step 2)** and **LangGraph RCA Agent (Step 3)** "
-            "will correlate these legs into a unified Call Session and generate root-cause hypotheses."
+            "ℹ️ **Phase 1 Status**: Deterministic parsing, multi-signal call correlation, and rule-based anomaly detection are fully active.\n\n"
+            "The **LangGraph Evidence-Driven RCA Agent** will receive the structured `EvidencePack` in the next milestone to reason over anomalies and recommend diagnostic next steps."
         )
 
 

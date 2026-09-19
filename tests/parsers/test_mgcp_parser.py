@@ -84,3 +84,26 @@ def test_mgcp_parser_standalone_command(mgcp_parser: MGCPParser):
     assert ev.message_type == "AUEP"
     assert ev.transaction_id == "999"
     assert ev.endpoint == "S0/SU0/DS1-0/1@vg224.cisco.com"
+
+
+def test_mgcp_parser_rqnt_and_rsip(mgcp_parser: MGCPParser):
+    raw_mgcp = """
+    RQNT 2001 S0/SU0/DS1-0/1@vg224.cisco.com MGCP 0.1
+    X: 10
+    S: rg
+
+    RSIP 3001 S0/SU0/DS1-0/1@vg224.cisco.com MGCP 0.1
+    RM: restart
+    """
+    events = mgcp_parser.parse(raw_mgcp)
+    assert len(events) == 2
+    rqnt = events[0]
+    assert rqnt.message_type == "RQNT"
+    assert rqnt.transaction_id == "2001"
+    assert rqnt.metadata.get("command") == "RQNT"
+
+    rsip = events[1]
+    assert rsip.message_type == "RSIP"
+    assert rsip.transaction_id == "3001"
+    assert rsip.metadata.get("command") == "RSIP"
+

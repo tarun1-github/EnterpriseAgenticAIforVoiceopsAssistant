@@ -6,7 +6,7 @@ from app.core.logging import get_logger
 from app.models.event import ProtocolEnum, VoiceEvent
 from app.parsers.base import BaseParser
 from app.parsers.cucm.parser import CUCMParser
-from app.parsers.detector import detect_protocol
+from app.parsers.detector import detect_multiple_protocols, detect_protocol, detect_segment_protocol
 from app.parsers.isdn.parser import ISDNParser
 from app.parsers.mgcp.parser import MGCPParser
 from app.parsers.sip.parser import SIPParser
@@ -34,6 +34,8 @@ class TraceIngestionEngine:
     ) -> List[VoiceEvent]:
         """Ingest raw trace text, auto-detect protocol if needed, and parse into VoiceEvents.
 
+        Supports single-protocol files as well as mixed-protocol gateway captures.
+
         Args:
             content: Raw trace string.
             source: Source identifier (e.g. filename).
@@ -46,14 +48,29 @@ class TraceIngestionEngine:
             logger.warning("Empty content provided for source '%s'", source)
             return []
 
-        # Autodetect protocol if not explicitly supplied
-        target_protocol = protocol or detect_protocol(content)
+        # If protocol is explicitly provided, use it directly
+        if protocol is not None:
+            parser = self._parsers.get(protocol)
+            if parser:
+                return parser.parse(content, source=source)
+
+        # Check if multiple protocols are present in this trace file
+        detected_protocols = detect_multiple_protocols(content)
+        if len(detected_protocols) > 1:
+            logger.info(
+                "Source '%s' contains multiple protocols %s. Executing mixed ingestion.",
+                source,
+                [p.value for p in detected_protocols],
+            )
+            return self.ingest_mixed_content(content, source=source, protocols=detected_protocols)
+
+        # Single primary protocol detected
+        target_protocol = detect_protocol(content)
         logger.info("Ingesting source '%s' with detected protocol: %s", source, target_protocol.value)
 
         parser = self._parsers.get(target_protocol)
         if not parser:
             logger.warning("No parser registered for protocol %s (source: %s)", target_protocol, source)
-            # Create a fallback UNKNOWN event preserving the raw text
             return [
                 VoiceEvent(
                     protocol=ProtocolEnum.UNKNOWN,
@@ -64,6 +81,41 @@ class TraceIngestionEngine:
             ]
 
         return parser.parse(content, source=source)
+
+    def ingest_mixed_content(
+        self,
+        content: str,
+        source: str = "mixed_trace",
+        protocols: Optional[List[ProtocolEnum]] = None,
+    ) -> List[VoiceEvent]:
+        """Ingest trace content that contains interleaved protocols (e.g. ISDN + MGCP + SIP).
+
+        Args:
+            content: Raw multi-protocol trace content.
+            source: Source identifier.
+            protocols: Optional pre-detected list of protocols.
+
+        Returns:
+            Aggregated list of VoiceEvents ordered by their appearance in the trace.
+        """
+        target_protocols = protocols or detect_multiple_protocols(content)
+        all_events: List[VoiceEvent] = []
+
+        for proto in target_protocols:
+            parser = self._parsers.get(proto)
+            if parser:
+                proto_events = parser.parse(content, source=source)
+                all_events.extend(proto_events)
+
+        # Sort events by their earliest line position in the raw content
+        def get_event_position(ev: VoiceEvent) -> int:
+            first_line = ev.raw.strip().splitlines()[0] if ev.raw else ""
+            pos = content.find(first_line)
+            return pos if pos != -1 else 0
+
+        all_events.sort(key=get_event_position)
+        logger.info("Extracted %d total events from mixed source '%s'", len(all_events), source)
+        return all_events
 
     def ingest_file(
         self,

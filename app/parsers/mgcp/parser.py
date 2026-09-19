@@ -93,17 +93,27 @@ class MGCPParser(BaseParser):
                 current_block.append(line)
                 continue
 
+            stripped = line.strip()
+            has_cmd = any(
+                MGCP_CMD_PATTERN.match(l.strip()) or MGCP_RESP_PATTERN.match(l.strip())
+                for l in current_block
+            )
+
+            if in_packet and has_cmd and (MGCP_CMD_PATTERN.match(stripped) or MGCP_RESP_PATTERN.match(stripped)):
+                chunks.append(("\n".join(current_block), current_meta))
+                current_block = [line]
+                current_meta = {"timestamp": None, "direction": DirectionEnum.UNKNOWN}
+                continue
+
             if in_packet:
                 current_block.append(line)
                 # End of MGCP packet delimiter in Cisco debug
-                if line.strip().startswith("<---") or line.strip() == "":
-                    if line.strip().startswith("<---"):
-                        chunks.append(("\n".join(current_block), current_meta))
-                        current_block = []
-                        in_packet = False
+                if stripped.startswith("<---"):
+                    chunks.append(("\n".join(current_block), current_meta))
+                    current_block = []
+                    in_packet = False
             else:
                 # Standalone MGCP line without banner
-                stripped = line.strip()
                 if MGCP_CMD_PATTERN.match(stripped) or MGCP_RESP_PATTERN.match(stripped):
                     if current_block:
                         chunks.append(("\n".join(current_block), current_meta))
@@ -155,6 +165,7 @@ class MGCPParser(BaseParser):
             trans_id = cmd_match.group("trans_id")
             endpoint = cmd_match.group("endpoint")
             msg_type = verb
+            metadata["command"] = verb
             metadata["mgcp_version"] = cmd_match.group("version")
         else:
             code = resp_match.group("code")
@@ -162,6 +173,8 @@ class MGCPParser(BaseParser):
             comment = resp_match.group("comment").strip()
             msg_type = f"{code} {comment}".strip()
             cause_code = f"MGCP {code} {comment}".strip()
+            metadata["response_code"] = int(code)
+            metadata["command"] = "RESPONSE"
 
         # Extract headers
         call_id = None
