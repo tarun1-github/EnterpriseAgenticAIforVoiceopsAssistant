@@ -1,0 +1,24 @@
+*Sep 19 14:22:01.123: ISDN Se0/2/0:23 Q931: RX <- SETUP pd = 8  callref = 0x0082
+    Sending Complete
+    Bearer Capability i = 0x8890
+        Standard = CCITT
+        Transfer Capability = Speech
+        Transfer Mode = Circuit
+        Transfer Rate = 64 kbit/s
+    Channel ID i = 0xA98381
+        Exclusive, Channel 1
+    Calling Party Number i = 0x0081, '2001'
+        Plan:ISDN, Type:Unknown
+    Called Party Number i = 0x80, '5001'
+        Plan:ISDN, Type:Unknown
+*Sep 19 14:22:01.150: ISDN Se0/2/0:23 Q931: TX -> CALL_PROC pd = 8  callref = 0x8082
+    Channel ID i = 0xA98381
+        Exclusive, Channel 1
+*Sep 19 14:22:01.200: ISDN Se0/2/0:23 Q931: TX -> ALERTING pd = 8  callref = 0x8082
+    Progress Ind i = 0x8188 - In-band info or appropriate now available
+*Sep 19 14:22:03.450: ISDN Se0/2/0:23 Q931: TX -> CONNECT pd = 8  callref = 0x8082
+*Sep 19 14:22:03.460: ISDN Se0/2/0:23 Q931: RX <- CONNECT_ACK pd = 8  callref = 0x0082
+*Sep 19 14:22:15.100: ISDN Se0/2/0:23 Q931: RX <- DISCONNECT pd = 8  callref = 0x0082
+    Cause i = 0x8090 - Normal call clearing
+*Sep 19 14:22:15.110: ISDN Se0/2/0:23 Q931: TX -> RELEASE pd = 8  callref = 0x8082
+*Sep 19 14:22:15.120: ISDN Se0/2/0:23 Q931: RX <- RELEASE_COMP pd = 8  callref = 0x0082

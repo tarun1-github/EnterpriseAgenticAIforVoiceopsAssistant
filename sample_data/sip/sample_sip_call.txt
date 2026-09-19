@@ -1,0 +1,98 @@
+*Sep 19 14:22:01.180: //123/A1B2C3D4E5F6/SIP/Msg/ccsipDisplayMsg:
+Received:
+INVITE sip:5001@10.1.1.10:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.1.1.20:5060;branch=z9hG4bK123456
+From: <sip:2001@10.1.1.20>;tag=12345
+To: <sip:5001@10.1.1.10>
+Date: Sat, 19 Sep 2026 14:22:01 GMT
+Call-ID: 456789@10.1.1.20
+CSeq: 101 INVITE
+Contact: <sip:2001@10.1.1.20:5060>
+Max-Forwards: 70
+Content-Type: application/sdp
+Content-Length: 200
+
+v=0
+o=CiscoSystemsSIP-GW-UserAgent 1234 5678 IN IP4 10.1.1.20
+s=SIP Call
+c=IN IP4 10.1.1.20
+t=0 0
+m=audio 16400 RTP/AVP 0 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:101 telephone-event/8000
+<---
+
+*Sep 19 14:22:01.200: //123/A1B2C3D4E5F6/SIP/Msg/ccsipDisplayMsg:
+Sent:
+SIP/2.0 100 Trying
+Via: SIP/2.0/UDP 10.1.1.20:5060;branch=z9hG4bK123456
+From: <sip:2001@10.1.1.20>;tag=12345
+To: <sip:5001@10.1.1.10>
+Call-ID: 456789@10.1.1.20
+CSeq: 101 INVITE
+Content-Length: 0
+<---
+
+*Sep 19 14:22:01.220: //123/A1B2C3D4E5F6/SIP/Msg/ccsipDisplayMsg:
+Sent:
+SIP/2.0 180 Ringing
+Via: SIP/2.0/UDP 10.1.1.20:5060;branch=z9hG4bK123456
+From: <sip:2001@10.1.1.20>;tag=12345
+To: <sip:5001@10.1.1.10>;tag=67890
+Call-ID: 456789@10.1.1.20
+CSeq: 101 INVITE
+Content-Length: 0
+<---
+
+*Sep 19 14:22:03.450: //123/A1B2C3D4E5F6/SIP/Msg/ccsipDisplayMsg:
+Sent:
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.1.1.20:5060;branch=z9hG4bK123456
+From: <sip:2001@10.1.1.20>;tag=12345
+To: <sip:5001@10.1.1.10>;tag=67890
+Call-ID: 456789@10.1.1.20
+CSeq: 101 INVITE
+Content-Type: application/sdp
+Content-Length: 195
+
+v=0
+o=Cisco-CUCM 999 1000 IN IP4 10.1.1.10
+s=SIP Call
+c=IN IP4 10.1.1.10
+t=0 0
+m=audio 24500 RTP/AVP 0 101
+a=rtpmap:0 PCMU/8000
+<---
+
+*Sep 19 14:22:03.470: //123/A1B2C3D4E5F6/SIP/Msg/ccsipDisplayMsg:
+Received:
+ACK sip:5001@10.1.1.10:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.1.1.20:5060;branch=z9hG4bK123457
+From: <sip:2001@10.1.1.20>;tag=12345
+To: <sip:5001@10.1.1.10>;tag=67890
+Call-ID: 456789@10.1.1.20
+CSeq: 101 ACK
+Content-Length: 0
+<---
+
+*Sep 19 14:22:15.100: //123/A1B2C3D4E5F6/SIP/Msg/ccsipDisplayMsg:
+Received:
+BYE sip:5001@10.1.1.10:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.1.1.20:5060;branch=z9hG4bK123458
+From: <sip:2001@10.1.1.20>;tag=12345
+To: <sip:5001@10.1.1.10>;tag=67890
+Call-ID: 456789@10.1.1.20
+CSeq: 102 BYE
+Content-Length: 0
+<---
+
+*Sep 19 14:22:15.110: //123/A1B2C3D4E5F6/SIP/Msg/ccsipDisplayMsg:
+Sent:
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.1.1.20:5060;branch=z9hG4bK123458
+From: <sip:2001@10.1.1.20>;tag=12345
+To: <sip:5001@10.1.1.10>;tag=67890
+Call-ID: 456789@10.1.1.20
+CSeq: 102 BYE
+Content-Length: 0
+<---

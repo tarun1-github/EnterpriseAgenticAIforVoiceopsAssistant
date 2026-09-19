@@ -1,0 +1,37 @@
+*Sep 19 14:22:01.160: MGCP Packet received from 10.1.1.10:2427--->
+CRCX 1001 S0/SU0/DS1-0/1@vg224.cisco.com MGCP 0.1
+C: D000000001
+L: p:20, a:PCMU, s:off
+M: recvonly
+X: 1
+<---
+
+*Sep 19 14:22:01.170: MGCP Packet sent to 10.1.1.10:2427--->
+200 1001 OK
+I: 1
+v=0
+c=IN IP4 10.1.1.20
+m=audio 16402 RTP/AVP 0
+<---
+
+*Sep 19 14:22:03.455: MGCP Packet received from 10.1.1.10:2427--->
+MDCX 1002 S0/SU0/DS1-0/1@vg224.cisco.com MGCP 0.1
+C: D000000001
+I: 1
+M: sendrecv
+<---
+
+*Sep 19 14:22:03.460: MGCP Packet sent to 10.1.1.10:2427--->
+200 1002 OK
+<---
+
+*Sep 19 14:22:15.105: MGCP Packet received from 10.1.1.10:2427--->
+DLCX 1003 S0/SU0/DS1-0/1@vg224.cisco.com MGCP 0.1
+C: D000000001
+I: 1
+<---
+
+*Sep 19 14:22:15.115: MGCP Packet sent to 10.1.1.10:2427--->
+250 1003 OK
+P: PS=1200, OS=192000, PR=1198, OR=191680, PL=2, JI=15, DL=20
+<---
