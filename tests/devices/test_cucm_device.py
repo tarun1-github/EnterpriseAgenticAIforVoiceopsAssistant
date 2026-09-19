@@ -147,14 +147,16 @@ class TestTransportConfig:
         with patch("app.devices.cucm.transport.get_settings") as mock_settings:
             mock_settings.return_value.cucm_host = "test-host"
             mock_settings.return_value.cucm_ssh_port = 22
-            mock_settings.return_value.cucm_username = "testuser"
-            mock_settings.return_value.cucm_password.get_secret_value.return_value = "testpass"
+            mock_settings.return_value.cucm_cli_username = "cli-user"
+            mock_settings.return_value.cucm_cli_password.get_secret_value.return_value = "cli-pass"
             mock_settings.return_value.cucm_ssh_timeout = 30
             mock_settings.return_value.cucm_command_timeout = 60
             mock_settings.return_value.cucm_prompt_timeout = 15
 
             transport = create_transport()
             assert isinstance(transport, NetmikoTransport)
+            assert transport.config.username == "cli-user"
+            assert transport.config.password == "cli-pass"
 
     def test_netmiko_import(self):
         """Verify Netmiko can be imported."""
@@ -162,34 +164,36 @@ class TestTransportConfig:
         assert netmiko.__version__
 
 
-class TestSSHCredentialSelection:
-    """Test SSH credential priority: SSH-specific > AXL fallback."""
+class TestCLICredentialIsolation:
+    """Test that Netmiko transport uses ONLY CLI Administrator credentials,
+    never AXL or Platform credentials."""
 
-    def test_create_transport_uses_ssh_credentials_when_available(self):
-        """When CUCM_SSH_USERNAME/PASSWORD set, they should be used."""
+    def test_transport_uses_cli_credentials(self):
+        """Netmiko MUST receive CUCM_CLI_USERNAME/PASSWORD."""
         with patch("app.devices.cucm.transport.get_settings") as mock_settings:
             mock_settings.return_value.cucm_host = "test-host"
             mock_settings.return_value.cucm_ssh_port = 22
-            mock_settings.return_value.cucm_ssh_username = "ssh-user"
-            mock_settings.return_value.cucm_ssh_password.get_secret_value.return_value = "ssh-pass"
-            mock_settings.return_value.cucm_username = "axl-user"  # Should be ignored
-            mock_settings.return_value.cucm_password.get_secret_value.return_value = "axl-pass"  # Should be ignored
+            mock_settings.return_value.cucm_cli_username = "cli-admin"
+            mock_settings.return_value.cucm_cli_password.get_secret_value.return_value = "cli-secret"
+            mock_settings.return_value.cucm_username = "axl-user"  # Must NOT be used
+            mock_settings.return_value.cucm_password.get_secret_value.return_value = "axl-pass"  # Must NOT be used
+            mock_settings.return_value.cucm_platform_username = "platform-user"  # Must NOT be used
+            mock_settings.return_value.cucm_platform_password.get_secret_value.return_value = "platform-pass"  # Must NOT be used
             mock_settings.return_value.cucm_ssh_timeout = 30
             mock_settings.return_value.cucm_command_timeout = 60
             mock_settings.return_value.cucm_prompt_timeout = 15
 
             transport = create_transport()
-            assert isinstance(transport, NetmikoTransport)
-            assert transport.config.username == "ssh-user"
-            assert transport.config.password == "ssh-pass"
+            assert transport.config.username == "cli-admin"
+            assert transport.config.password == "cli-secret"
 
-    def test_create_transport_falls_back_to_axl_credentials(self):
-        """When SSH credentials not set, fall back to AXL credentials."""
+    def test_transport_never_uses_axl_credentials(self):
+        """Even when CLI credentials missing, transport does NOT fall back to AXL."""
         with patch("app.devices.cucm.transport.get_settings") as mock_settings:
             mock_settings.return_value.cucm_host = "test-host"
             mock_settings.return_value.cucm_ssh_port = 22
-            mock_settings.return_value.cucm_ssh_username = None
-            mock_settings.return_value.cucm_ssh_password = None
+            mock_settings.return_value.cucm_cli_username = None
+            mock_settings.return_value.cucm_cli_password = None
             mock_settings.return_value.cucm_username = "axl-user"
             mock_settings.return_value.cucm_password.get_secret_value.return_value = "axl-pass"
             mock_settings.return_value.cucm_ssh_timeout = 30
@@ -197,52 +201,80 @@ class TestSSHCredentialSelection:
             mock_settings.return_value.cucm_prompt_timeout = 15
 
             transport = create_transport()
-            assert transport.config.username == "axl-user"
-            assert transport.config.password == "axl-pass"
+            # Should use empty strings, NOT AXL credentials
+            assert transport.config.username == ""
+            assert transport.config.password == ""
 
-    def test_create_transport_ssh_username_only_uses_axl_password(self):
-        """When only SSH username set, fall back to AXL password."""
+    def test_transport_never_uses_platform_credentials(self):
+        """Platform credentials must never be used for SSH."""
         with patch("app.devices.cucm.transport.get_settings") as mock_settings:
             mock_settings.return_value.cucm_host = "test-host"
             mock_settings.return_value.cucm_ssh_port = 22
-            mock_settings.return_value.cucm_ssh_username = "ssh-user"
-            mock_settings.return_value.cucm_ssh_password = None
-            mock_settings.return_value.cucm_username = "axl-user"
-            mock_settings.return_value.cucm_password.get_secret_value.return_value = "axl-pass"
-            mock_settings.return_value.cucm_ssh_timeout = 30
-            mock_settings.return_value.cucm_command_timeout = 60
-            mock_settings.return_value.cucm_prompt_timeout = 15
-
-            transport = create_transport()
-            assert transport.config.username == "ssh-user"
-            assert transport.config.password == "axl-pass"
-
-    def test_create_transport_ssh_password_only_uses_axl_username(self):
-        """When only SSH password set, fall back to AXL username."""
-        with patch("app.devices.cucm.transport.get_settings") as mock_settings:
-            mock_settings.return_value.cucm_host = "test-host"
-            mock_settings.return_value.cucm_ssh_port = 22
-            mock_settings.return_value.cucm_ssh_username = None
-            mock_settings.return_value.cucm_ssh_password.get_secret_value.return_value = "ssh-pass"
-            mock_settings.return_value.cucm_username = "axl-user"
+            mock_settings.return_value.cucm_cli_username = None
+            mock_settings.return_value.cucm_cli_password = None
+            mock_settings.return_value.cucm_username = None
             mock_settings.return_value.cucm_password = None
+            mock_settings.return_value.cucm_platform_username = "platform-user"
+            mock_settings.return_value.cucm_platform_password.get_secret_value.return_value = "platform-pass"
             mock_settings.return_value.cucm_ssh_timeout = 30
             mock_settings.return_value.cucm_command_timeout = 60
             mock_settings.return_value.cucm_prompt_timeout = 15
 
             transport = create_transport()
-            assert transport.config.username == "axl-user"
-            assert transport.config.password == "ssh-pass"
+            assert transport.config.username == ""
+            assert transport.config.password == ""
+
+    def test_missing_cli_credentials_produces_empty_strings(self):
+        """Missing CLI credentials result in empty strings (clear config error later)."""
+        with patch("app.devices.cucm.transport.get_settings") as mock_settings:
+            mock_settings.return_value.cucm_host = "test-host"
+            mock_settings.return_value.cucm_ssh_port = 22
+            mock_settings.return_value.cucm_cli_username = None
+            mock_settings.return_value.cucm_cli_password = None
+            mock_settings.return_value.cucm_ssh_timeout = 30
+            mock_settings.return_value.cucm_command_timeout = 60
+            mock_settings.return_value.cucm_prompt_timeout = 15
+
+            transport = create_transport()
+            assert transport.config.username == ""
+            assert transport.config.password == ""
+
+    def test_all_three_credential_sets_independent(self):
+        """All three credential groups are completely independent."""
+        with patch("app.devices.cucm.transport.get_settings") as mock_settings:
+            mock_settings.return_value.cucm_host = "test-host"
+            mock_settings.return_value.cucm_ssh_port = 22
+            mock_settings.return_value.cucm_cli_username = "cli-user"
+            mock_settings.return_value.cucm_cli_password.get_secret_value.return_value = "cli-pass"
+            mock_settings.return_value.cucm_username = "axl-user"
+            mock_settings.return_value.cucm_password.get_secret_value.return_value = "axl-pass"
+            mock_settings.return_value.cucm_platform_username = "platform-user"
+            mock_settings.return_value.cucm_platform_password.get_secret_value.return_value = "platform-pass"
+            mock_settings.return_value.cucm_ssh_timeout = 30
+            mock_settings.return_value.cucm_command_timeout = 60
+            mock_settings.return_value.cucm_prompt_timeout = 15
+
+            transport = create_transport()
+            assert transport.config.username == "cli-user"
+            assert transport.config.password == "cli-pass"
+            # Verify AXL and Platform are untouched
+            assert transport.config.username != "axl-user"
+            assert transport.config.password != "axl-pass"
+            assert transport.config.username != "platform-user"
+            assert transport.config.password != "platform-pass"
+            assert transport.config.password == "cli-pass"
 
     def test_create_transport_empty_credentials(self):
         """When no credentials set, use empty strings."""
         with patch("app.devices.cucm.transport.get_settings") as mock_settings:
             mock_settings.return_value.cucm_host = "test-host"
             mock_settings.return_value.cucm_ssh_port = 22
-            mock_settings.return_value.cucm_ssh_username = None
-            mock_settings.return_value.cucm_ssh_password = None
+            mock_settings.return_value.cucm_cli_username = None
+            mock_settings.return_value.cucm_cli_password = None
             mock_settings.return_value.cucm_username = None
             mock_settings.return_value.cucm_password = None
+            mock_settings.return_value.cucm_platform_username = None
+            mock_settings.return_value.cucm_platform_password = None
             mock_settings.return_value.cucm_ssh_timeout = 30
             mock_settings.return_value.cucm_command_timeout = 60
             mock_settings.return_value.cucm_prompt_timeout = 15

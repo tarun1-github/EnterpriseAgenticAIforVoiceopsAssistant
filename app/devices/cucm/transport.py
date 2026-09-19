@@ -242,20 +242,24 @@ class NetmikoTransport(CUCMTransport):
 
 
 def create_transport(config: Optional[TransportConfig] = None) -> CUCMTransport:
-    """Factory function to create CUCM transport."""
+    """Factory function to create CUCM transport.
+
+    Uses CUCM CLI Administrator credentials (CUCM_CLI_USERNAME/PASSWORD).
+    Does NOT use AXL credentials (CUCM_USERNAME/PASSWORD) or Platform credentials.
+    """
     if config is None:
         settings = get_settings()
-        # Use SSH-specific credentials for CLI access, not AXL credentials
-        ssh_username = settings.cucm_ssh_username or settings.cucm_username or ""
-        ssh_password = (
-            settings.cucm_ssh_password.get_secret_value() if settings.cucm_ssh_password
-            else (settings.cucm_password.get_secret_value() if settings.cucm_password else "")
+        # Use CLI Administrator credentials for SSH/CLI access
+        cli_username = settings.cucm_cli_username or ""
+        cli_password = (
+            settings.cucm_cli_password.get_secret_value()
+            if settings.cucm_cli_password else ""
         )
         config = TransportConfig(
             host=settings.cucm_host or "",
             port=settings.cucm_ssh_port,
-            username=ssh_username,
-            password=ssh_password,
+            username=cli_username,
+            password=cli_password,
             timeout=settings.cucm_ssh_timeout,
             command_timeout=settings.cucm_command_timeout,
             prompt_timeout=settings.cucm_prompt_timeout,

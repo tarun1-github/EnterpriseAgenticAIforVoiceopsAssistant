@@ -43,20 +43,29 @@ class Settings(BaseSettings):
         description="Ollama local endpoint URL",
     )
 
-    # Cisco CUCM 15.0 (Reserved for future live connectivity)
+    # Cisco CUCM 15.0 Configuration
+    # ----------------------------------------------------------------
+    # AXL Application Credentials (HTTPS :8443)
+    # Used ONLY for AXL/API operations
     cucm_host: Optional[str] = Field(default=None, description="CUCM Publisher IP or FQDN")
     cucm_port: int = Field(default=8443, description="AXL/RIS port")
-    cucm_username: Optional[str] = Field(default=None, description="CUCM Application user")
-    cucm_password: Optional[SecretStr] = Field(default=None, description="CUCM Application password")
+    cucm_username: Optional[str] = Field(default=None, description="CUCM AXL Application username")
+    cucm_password: Optional[SecretStr] = Field(default=None, description="CUCM AXL Application password")
     cucm_verify_ssl: bool = Field(default=False, description="Verify CUCM TLS certificate")
 
-    # Cisco CUCM SSH/CLI Configuration (for trace collection)
+    # CUCM CLI Administrator Credentials (SSH :22)
+    # Used ONLY for SSH access to admin: CLI and SDL trace collection
+    cucm_cli_username: Optional[str] = Field(default=None, description="CUCM CLI Administrator username")
+    cucm_cli_password: Optional[SecretStr] = Field(default=None, description="CUCM CLI Administrator password")
     cucm_ssh_port: int = Field(default=22, description="CUCM SSH port")
-    cucm_ssh_username: Optional[str] = Field(default=None, description="CUCM OS/CLI SSH username")
-    cucm_ssh_password: Optional[SecretStr] = Field(default=None, description="CUCM OS/CLI SSH password")
     cucm_ssh_timeout: int = Field(default=30, description="SSH connection timeout (seconds)")
     cucm_command_timeout: int = Field(default=60, description="CLI command execution timeout (seconds)")
     cucm_prompt_timeout: int = Field(default=15, description="Prompt detection timeout (seconds)")
+
+    # CUCM Platform Administrator Credentials
+    # Reserved for future platform-level operations
+    cucm_platform_username: Optional[str] = Field(default=None, description="CUCM Platform Administrator username")
+    cucm_platform_password: Optional[SecretStr] = Field(default=None, description="CUCM Platform Administrator password")
 
     # Cisco Voice Gateway (Reserved for future live integration)
     gateway_host: Optional[str] = Field(default=None, description="Voice Gateway IP or FQDN")
