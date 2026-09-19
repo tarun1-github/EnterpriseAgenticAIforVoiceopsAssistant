@@ -8,8 +8,8 @@ Usage:
 
 Requires .env with:
     CUCM_HOST=10.197.206.141
-    CUCM_USERNAME=Administrator
-    CUCM_PASSWORD=c1sc0123!
+    CUCM_SSH_USERNAME=Administrator
+    CUCM_SSH_PASSWORD=c1sc0123!
     CUCM_SSH_PORT=22
 """
 
@@ -46,10 +46,11 @@ def run_diagnostic() -> int:
 
     print_header("VoiceOps AI - CUCM Connection Diagnostic")
     print(f"Target: {settings.cucm_host}:{settings.cucm_ssh_port}")
-    print(f"User: {settings.cucm_username}")
+    ssh_user = settings.cucm_ssh_username or settings.cucm_username
+    print(f"SSH User: {ssh_user}")
 
-    if not settings.cucm_host or not settings.cucm_username:
-        print_step("Configuration", "FAIL", "CUCM_HOST or CUCM_USERNAME not set in .env")
+    if not settings.cucm_host or not ssh_user:
+        print_step("Configuration", "FAIL", "CUCM_HOST or CUCM_SSH_USERNAME/CUCM_USERNAME not set in .env")
         return 1
 
     client = CUCMClient()

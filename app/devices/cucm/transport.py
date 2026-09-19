@@ -245,11 +245,17 @@ def create_transport(config: Optional[TransportConfig] = None) -> CUCMTransport:
     """Factory function to create CUCM transport."""
     if config is None:
         settings = get_settings()
+        # Use SSH-specific credentials for CLI access, not AXL credentials
+        ssh_username = settings.cucm_ssh_username or settings.cucm_username or ""
+        ssh_password = (
+            settings.cucm_ssh_password.get_secret_value() if settings.cucm_ssh_password
+            else (settings.cucm_password.get_secret_value() if settings.cucm_password else "")
+        )
         config = TransportConfig(
             host=settings.cucm_host or "",
             port=settings.cucm_ssh_port,
-            username=settings.cucm_username or "",
-            password=settings.cucm_password.get_secret_value() if settings.cucm_password else "",
+            username=ssh_username,
+            password=ssh_password,
             timeout=settings.cucm_ssh_timeout,
             command_timeout=settings.cucm_command_timeout,
             prompt_timeout=settings.cucm_prompt_timeout,

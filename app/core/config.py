@@ -52,6 +52,8 @@ class Settings(BaseSettings):
 
     # Cisco CUCM SSH/CLI Configuration (for trace collection)
     cucm_ssh_port: int = Field(default=22, description="CUCM SSH port")
+    cucm_ssh_username: Optional[str] = Field(default=None, description="CUCM OS/CLI SSH username")
+    cucm_ssh_password: Optional[SecretStr] = Field(default=None, description="CUCM OS/CLI SSH password")
     cucm_ssh_timeout: int = Field(default=30, description="SSH connection timeout (seconds)")
     cucm_command_timeout: int = Field(default=60, description="CLI command execution timeout (seconds)")
     cucm_prompt_timeout: int = Field(default=15, description="Prompt detection timeout (seconds)")
