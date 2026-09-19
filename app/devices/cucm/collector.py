@@ -1,11 +1,10 @@
 """CUCM SDL trace file collector with multiple retrieval strategies."""
 
-import os
 import tempfile
 import shutil
 from pathlib import Path
 from typing import List, Optional, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.core.logging import get_logger
 from app.core.config import get_settings
@@ -27,22 +26,90 @@ class CollectionResult:
     method: str = "unknown"
 
 
+@dataclass
+class CollectorConfig:
+    """Configuration for trace collection."""
+    large_file_threshold_mb: int = 10
+    local_storage: Optional[Path] = None
+
+
 class CUCMTraceCollector:
     """Collects SDL trace files from CUCM using available mechanisms.
 
     Supported methods:
     1. file view (CLI) - for small files, no external dependencies
-    2. file get (SFTP) - for large files, requires SFTP server
+    2. file get (SFTP) - for large files, requires SFTP server (NOT YET IMPLEMENTED)
+
+    Note: SFTP-based file get is a separate milestone. This collector only supports
+    'file view' for now. Attempting 'get' will return a clear failure result.
     """
 
     def __init__(
         self,
         client: Optional[CUCMClient] = None,
-        local_storage: Optional[Path] = None,
+        config: Optional[CollectorConfig] = None,
     ):
         self._client = client or CUCMClient()
-        self._local_storage = local_storage or Path(tempfile.gettempdir()) / "voiceops_traces"
+        self._config = config or CollectorConfig()
+        self._local_storage = (
+            self._config.local_storage
+            or Path(tempfile.gettempdir()) / "voiceops_traces"
+        )
         self._local_storage.mkdir(parents=True, exist_ok=True)
+
+    def _validate_filename(self, filename: str) -> Path:
+        """Validate filename and return safe local path.
+
+        Prevents path traversal attacks by ensuring the resolved path
+        stays within the local storage directory.
+
+        Args:
+            filename: The filename to validate.
+
+        Returns:
+            Safe local Path within storage directory.
+
+        Raises:
+            CUCMTraceCollectionError: If filename is unsafe.
+        """
+        # Reject empty or None filenames
+        if not filename or not filename.strip():
+            raise CUCMTraceCollectionError(
+                "Filename cannot be empty",
+                filename=filename,
+                stage="validation",
+            )
+
+        # Reject absolute paths (Windows and Unix-style)
+        if Path(filename).is_absolute() or filename.startswith("/"):
+            raise CUCMTraceCollectionError(
+                "Absolute paths are not allowed",
+                filename=filename,
+                stage="validation",
+            )
+
+        # Reject path traversal attempts (..)
+        if ".." in filename:
+            raise CUCMTraceCollectionError(
+                "Path traversal detected in filename",
+                filename=filename,
+                stage="validation",
+            )
+
+        # Resolve the local path and ensure it's within storage directory
+        local_path = (self._local_storage / filename).resolve()
+        storage_resolved = self._local_storage.resolve()
+
+        try:
+            local_path.relative_to(storage_resolved)
+        except ValueError:
+            raise CUCMTraceCollectionError(
+                "Filename resolves outside storage directory",
+                filename=filename,
+                stage="validation",
+            )
+
+        return local_path
 
     def collect_file(
         self,
@@ -63,30 +130,47 @@ class CUCMTraceCollector:
         if not self._client.is_connected():
             raise CUCMConnectionError("CUCM client not connected")
 
+        # Validate filename early
+        try:
+            local_path = self._validate_filename(filename)
+        except CUCMTraceCollectionError as e:
+            return CollectionResult(
+                filename=filename,
+                local_path=None,
+                size_bytes=0,
+                success=False,
+                error=str(e),
+                method="validation",
+            )
+
         if method == "auto":
-            # Try to determine best method based on file size
+            # Determine best method based on file size
             files = self._client.list_sdl_files(remote_path)
             target = next((f for f in files if f.filename == filename), None)
-            if target and target.size_bytes > 10 * 1024 * 1024:  # > 10MB
+            if target and target.size_bytes > self._config.large_file_threshold_mb * 1024 * 1024:
                 method = "get"
             else:
                 method = "view"
 
         if method == "view":
-            return self._collect_via_view(filename, remote_path)
+            return self._collect_via_view(filename, remote_path, local_path)
         elif method == "get":
-            return self._collect_via_get(filename, remote_path)
+            return self._collect_via_get(filename, remote_path, local_path)
         else:
-            raise CUCMTraceCollectionError(
-                f"Unknown collection method: {method}",
+            return CollectionResult(
                 filename=filename,
-                stage="method_selection",
+                local_path=None,
+                size_bytes=0,
+                success=False,
+                error=f"Unknown collection method: {method}",
+                method=method,
             )
 
     def _collect_via_view(
         self,
         filename: str,
         remote_path: str,
+        local_path: Path,
     ) -> CollectionResult:
         """Collect file using 'file view' CLI command.
 
@@ -97,7 +181,6 @@ class CUCMTraceCollector:
             logger.info("Collecting %s via 'file view'", filename)
             content = self._client.get_sdl_file_content(filename, remote_path)
 
-            local_path = self._local_storage / filename
             local_path.write_text(content, encoding="utf-8", errors="replace")
 
             size = local_path.stat().st_size
@@ -125,23 +208,29 @@ class CUCMTraceCollector:
         self,
         filename: str,
         remote_path: str,
+        local_path: Path,
     ) -> CollectionResult:
         """Collect file using 'file get' with SFTP.
 
-        Requires: SFTP server accessible from CUCM.
-        This is the recommended method for production use.
-        """
-        # This is a placeholder for the SFTP-based collection.
-        # Actual implementation requires:
-        # 1. An SFTP server (could be local or remote)
-        # 2. CUCM configured to allow file get to that server
-        # 3. The application to retrieve from the SFTP server
+        NOT YET IMPLEMENTED - requires:
+        1. An SFTP server accessible from CUCM
+        2. CUCM configured to allow file get to that server
+        3. Application to retrieve from the SFTP server
 
-        logger.warning(
-            "File get (SFTP) method not fully implemented. "
-            "Requires SFTP server setup. Falling back to view."
+        Returns a clear failure result instead of silently falling back.
+        """
+        logger.warning("File get (SFTP) requested but not yet implemented")
+        return CollectionResult(
+            filename=filename,
+            local_path=None,
+            size_bytes=0,
+            success=False,
+            error=(
+                "SFTP-based file get is not yet configured. "
+                "Use method='view' for small files or configure SFTP server."
+            ),
+            method="get",
         )
-        return self._collect_via_view(filename, remote_path)
 
     def collect_multiple(
         self,

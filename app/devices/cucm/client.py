@@ -119,6 +119,36 @@ class CUCMClient:
         command = f"file view {full_path}"
         return self._transport.send_command(command)
 
+    def get_prompt(self) -> str:
+        """Get the detected CUCM CLI prompt.
+
+        Returns:
+            The prompt string (e.g., "admin:").
+
+        Raises:
+            CUCMConnectionError: If not connected.
+        """
+        if not self.is_connected():
+            raise CUCMConnectionError("Not connected to CUCM")
+        return self._transport.get_prompt()
+
+    def execute_read_only(self, command: str) -> str:
+        """Execute a read-only CLI command on CUCM.
+
+        Args:
+            command: The CLI command to execute (e.g., "show version active").
+
+        Returns:
+            Command output as string.
+
+        Raises:
+            CUCMConnectionError: If not connected.
+            CUCMCommandError: If command fails.
+        """
+        if not self.is_connected():
+            raise CUCMConnectionError("Not connected to CUCM")
+        return self._transport.send_command(command)
+
     def run_diagnostic(self) -> dict:
         """Run connection and capability diagnostic.
 

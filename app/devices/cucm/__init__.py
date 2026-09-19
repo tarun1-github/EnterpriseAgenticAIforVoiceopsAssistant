@@ -5,7 +5,7 @@ for trace collection and diagnostic operations.
 """
 
 from app.devices.cucm.client import CUCMClient
-from app.devices.cucm.collector import CUCMTraceCollector, CollectionResult
+from app.devices.cucm.collector import CUCMTraceCollector, CollectionResult, CollectorConfig
 from app.devices.cucm.transport import CUCMTransport, NetmikoTransport, TransportConfig, create_transport
 from app.devices.cucm.models import CUCMVersion, CUCMTraceFile
 from app.devices.cucm.exceptions import (
@@ -22,6 +22,7 @@ __all__ = [
     "CUCMClient",
     "CUCMTraceCollector",
     "CollectionResult",
+    "CollectorConfig",
     "CUCMTransport",
     "NetmikoTransport",
     "TransportConfig",

@@ -73,7 +73,7 @@ def run_diagnostic() -> int:
     # Test 3: CUCM Prompt Detection
     print_step("CUCM Prompt Detection", "RUN")
     try:
-        prompt = client._transport.get_prompt()
+        prompt = client.get_prompt()
         results["prompt"] = True
         print_step("CUCM Prompt Detection", "PASS", f"Prompt: {prompt}")
     except Exception as e:
@@ -83,7 +83,7 @@ def run_diagnostic() -> int:
     # Test 4: Command Execution
     print_step("Command Execution", "RUN")
     try:
-        output = client._transport.send_command("show version active")
+        output = client.execute_read_only("show version active")
         if output and len(output) > 10:
             results["command"] = True
             print_step("Command Execution", "PASS", "Command returned output")

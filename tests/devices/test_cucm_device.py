@@ -11,7 +11,7 @@ from app.devices.cucm.transport import (
     create_transport,
 )
 from app.devices.cucm.client import CUCMClient
-from app.devices.cucm.collector import CUCMTraceCollector, CollectionResult
+from app.devices.cucm.collector import CUCMTraceCollector, CollectionResult, CollectorConfig
 from app.devices.cucm.models import CUCMVersion, CUCMTraceFile
 from app.devices.cucm.exceptions import (
     CUCMConnectionError,
@@ -61,6 +61,31 @@ class MockTransport(CUCMTransport):
         return self._prompt
 
 
+# --- Mock Transport with Large Files ---
+
+class MockTransportWithLargeFiles(MockTransport):
+    """Mock transport that returns large file listings."""
+
+    def __init__(self, config: TransportConfig, responses: dict = None):
+        super().__init__(config, responses)
+        self._responses = {
+            "show version active": """
+Active Master Version: 15.0.1.12900-17
+Active Version: 15.0.1.12900-17
+Build: 12900
+Edition: Standard
+Install Date: 2024-01-15
+            """.strip(),
+            "file list activelog/cm/trace/ccm/sdl detail": """
+-rw-r--r--  1 admin admin  1024000 Sep 19 10:30 SDL_0001_20240919_103000
+-rw-r--r--  1 admin admin  2048000 Sep 19 11:00 SDL_0002_20240919_110000
+-rw-r--r--  1 admin admin  52428800 Sep 19 11:30 SDL_LARGE_20240919_113000
+            """.strip(),
+        }
+        if responses:
+            self._responses.update(responses)
+
+
 # --- Fixtures ---
 
 @pytest.fixture
@@ -96,8 +121,18 @@ Install Date: 2024-01-15
 
 
 @pytest.fixture
+def mock_transport_large_files(transport_config):
+    return MockTransportWithLargeFiles(transport_config)
+
+
+@pytest.fixture
 def cucm_client(mock_transport):
     return CUCMClient(transport=mock_transport)
+
+
+@pytest.fixture
+def cucm_client_large_files(mock_transport_large_files):
+    return CUCMClient(transport=mock_transport_large_files)
 
 
 # --- Transport Tests ---
@@ -120,6 +155,11 @@ class TestTransportConfig:
 
             transport = create_transport()
             assert isinstance(transport, NetmikoTransport)
+
+    def test_netmiko_import(self):
+        """Verify Netmiko can be imported."""
+        import netmiko
+        assert netmiko.__version__
 
 
 class TestMockTransport:
@@ -286,6 +326,26 @@ class TestCUCMClient:
         with pytest.raises(CUCMConnectionError):
             cucm_client.list_sdl_files()
 
+    def test_get_prompt_public_api(self, cucm_client):
+        """Test public get_prompt() method."""
+        cucm_client.connect()
+        prompt = cucm_client.get_prompt()
+        assert prompt == "admin:"
+
+    def test_get_prompt_not_connected(self, cucm_client):
+        with pytest.raises(CUCMConnectionError):
+            cucm_client.get_prompt()
+
+    def test_execute_read_only_public_api(self, cucm_client):
+        """Test public execute_read_only() method."""
+        cucm_client.connect()
+        output = cucm_client.execute_read_only("show version active")
+        assert "Active Version" in output
+
+    def test_execute_read_only_not_connected(self, cucm_client):
+        with pytest.raises(CUCMConnectionError):
+            cucm_client.execute_read_only("show version active")
+
     def test_run_diagnostic(self, cucm_client):
         cucm_client.connect()
         diag = cucm_client.run_diagnostic()
@@ -331,6 +391,73 @@ class TestCUCMTraceCollector:
         collector = CUCMTraceCollector(client=cucm_client)
         collector.clear_local_storage()
         assert collector.get_local_storage_path().exists()
+
+    def test_collect_via_get_returns_failure(self, cucm_client):
+        """Test that 'get' method returns clear failure (not implemented)."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+        result = collector.collect_file("SDL_0001_20240919_103000", method="get")
+        assert not result.success
+        assert result.method == "get"
+        assert "SFTP-based file get is not yet configured" in result.error
+        assert result.local_path is None
+
+    def test_auto_method_large_file_returns_failure(self, cucm_client_large_files):
+        """Test auto method returns failure for large files (get not implemented)."""
+        cucm_client_large_files.connect()
+        # Configure collector with 10MB threshold (default)
+        collector = CUCMTraceCollector(client=cucm_client_large_files)
+        # SDL_LARGE is 50MB (> 10MB threshold)
+        result = collector.collect_file("SDL_LARGE_20240919_113000", method="auto")
+        assert not result.success
+        assert result.method == "get"
+        assert "SFTP-based file get is not yet configured" in result.error
+
+    def test_auto_method_small_file_uses_view(self, cucm_client_large_files):
+        """Test auto method uses view for small files."""
+        cucm_client_large_files.connect()
+        collector = CUCMTraceCollector(client=cucm_client_large_files)
+        # SDL_0001 is 1MB (< 10MB threshold)
+        result = collector.collect_file("SDL_0001_20240919_103000", method="auto")
+        assert result.success
+        assert result.method == "view"
+
+    def test_filename_validation_rejects_path_traversal(self, cucm_client):
+        """Test that path traversal attempts are rejected."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+        result = collector.collect_file("../../etc/passwd", method="view")
+        assert not result.success
+        assert result.method == "validation"
+        assert "Path traversal" in result.error or "resolves outside" in result.error
+
+    def test_filename_validation_rejects_absolute_path(self, cucm_client):
+        """Test that absolute paths are rejected."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+        result = collector.collect_file("/etc/passwd", method="view")
+        assert not result.success
+        assert result.method == "validation"
+        assert "Absolute paths" in result.error
+
+    def test_filename_validation_rejects_empty(self, cucm_client):
+        """Test that empty filenames are rejected."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+        result = collector.collect_file("", method="view")
+        assert not result.success
+        assert result.method == "validation"
+        assert "empty" in result.error.lower()
+
+    def test_custom_large_file_threshold(self, cucm_client_large_files):
+        """Test that large file threshold is configurable."""
+        cucm_client_large_files.connect()
+        # Set threshold to 100MB - SDL_LARGE (50MB) should now use view
+        config = CollectorConfig(large_file_threshold_mb=100)
+        collector = CUCMTraceCollector(client=cucm_client_large_files, config=config)
+        result = collector.collect_file("SDL_LARGE_20240919_113000", method="auto")
+        assert result.success
+        assert result.method == "view"
 
 
 # --- Exception Tests ---

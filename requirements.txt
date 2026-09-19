@@ -3,5 +3,6 @@ pydantic-settings>=2.2.0
 python-dotenv>=1.0.1
 streamlit>=1.35.0
 pandas>=2.2.0
+netmiko>=4.3.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0

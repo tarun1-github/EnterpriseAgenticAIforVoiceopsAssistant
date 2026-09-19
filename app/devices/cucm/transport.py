@@ -6,6 +6,13 @@ Netmiko is chosen because:
 - Built-in timeout and retry logic
 - Simpler than Paramiko for interactive CLI sessions
 - Properly handles SSH negotiation and authentication delays
+
+Device Type Selection:
+- CUCM CLI presents an "admin:" prompt (similar to Cisco IOS privileged exec)
+- "cisco_ios" device type handles prompt detection via base_prompt pattern
+- Netmiko's find_prompt() detects the trailing prompt characters
+- Using "cisco_ios" with fast_cli=False and proper timeouts ensures
+  delayed authentication prompts and CUCM CLI prompts are handled correctly
 """
 
 from abc import ABC, abstractmethod
@@ -65,15 +72,20 @@ class CUCMTransport(ABC):
         """Send command using timing-based approach (no prompt detection)."""
         pass
 
+    @abstractmethod
+    def get_prompt(self) -> str:
+        """Get the detected CUCM CLI prompt."""
+        pass
+
 
 class NetmikoTransport(CUCMTransport):
     """Netmiko-based SSH transport for CUCM.
 
     Handles:
-    - Delayed password prompt via Netmiko's connection logic
-    - Delayed CUCM CLI prompt via expect_string
-    - Command timeouts
-    - Pagination (terminal length 0)
+    - Delayed password prompt via Netmiko's connection logic (auth_timeout, banner_timeout)
+    - Delayed CUCM CLI prompt via expect_string and find_prompt()
+    - Command timeouts (read_timeout_override, session_timeout)
+    - Pagination (set cli pagination off)
     """
 
     def __init__(self, config: TransportConfig):
@@ -94,8 +106,10 @@ class NetmikoTransport(CUCMTransport):
         except ImportError:
             raise CUCMConnectionError("Netmiko not installed. Run: pip install netmiko")
 
+        # Use cisco_ios device type - CUCM CLI uses "admin:" prompt similar to IOS privileged mode
+        # fast_cli=False ensures proper prompt detection for non-standard prompts
         device = {
-            "device_type": "cisco_cts",  # Closest Netmiko device type for CUCM
+            "device_type": "cisco_ios",
             "host": self.config.host,
             "port": self.config.port,
             "username": self.config.username,
@@ -118,8 +132,10 @@ class NetmikoTransport(CUCMTransport):
             # Disable pagination
             self._disable_pagination()
 
-            # Detect base prompt
+            # Detect base prompt (e.g., "admin:")
             self._base_prompt = self._connection.find_prompt().strip()
+            if not self._base_prompt:
+                raise CUCMPromptError("Failed to detect CUCM CLI prompt after connection")
             logger.info("CUCM connection established. Prompt: %s", self._base_prompt)
 
         except NetmikoTimeoutException as e:
@@ -138,16 +154,18 @@ class NetmikoTransport(CUCMTransport):
         except SSHException as e:
             logger.error("SSH protocol error: %s", e)
             raise CUCMConnectionError(f"SSH protocol error: {e}", host=self.config.host) from e
+        except CUCMPromptError:
+            raise
         except Exception as e:
             logger.error("Unexpected connection error: %s", e)
             raise CUCMConnectionError(f"Connection failed: {e}", host=self.config.host) from e
 
     def _disable_pagination(self) -> None:
-        """Disable CLI pagination (terminal length 0)."""
+        """Disable CLI pagination (set cli pagination off)."""
         try:
             output = self._connection.send_command(
                 "set cli pagination off",
-                expect_string=r"[#>]",
+                expect_string=r"[#>:]",
                 read_timeout=self.config.prompt_timeout,
             )
             logger.debug("Pagination disabled: %s", output.strip())
