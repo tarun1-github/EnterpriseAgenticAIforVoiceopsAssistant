@@ -65,11 +65,12 @@ class CUCMClient:
         output = self._transport.send_command("show version active")
         return CUCMVersion.from_cli_output(output)
 
-    def list_sdl_files(self, path: str = "activelog/cm/trace/ccm/sdl") -> List[CUCMTraceFile]:
+    def list_sdl_files(self, path: str = "activelog /cm/trace/ccm/sdl") -> List[CUCMTraceFile]:
         """List SDL trace files in the specified directory.
 
         Args:
-            path: Directory path on CUCM (default: activelog/cm/trace/ccm/sdl)
+            path: Directory path on CUCM (default: activelog /cm/trace/ccm/sdl).
+                  Note: CUCM requires space between 'activelog' and '/cm/...'.
 
         Returns:
             List of CUCMTraceFile objects.
@@ -82,14 +83,25 @@ class CUCMClient:
             raise CUCMConnectionError("Not connected to CUCM")
 
         logger.info("Discovering SDL files in %s", path)
-        command = f"file list {path} detail"
+        # CUCM uses space-separated syntax: file list <path> detail
+        # CUCM requires: activelog /cm/trace/ccm/sdl (space before /cm)
+        # Normalize path: ensure it uses forward slashes, preserve the space
+        normalized_path = path.replace("\\", "/")
+        command = f"file list {normalized_path} detail"
         output = self._transport.send_command(command)
 
+        # DIAGNOSTIC: Log exact raw output
+        logger.info("SDL command: %r", command)
+        logger.info("SDL raw output: %r", output)
+        logger.info("SDL output lines: %d", len(output.splitlines()))
+
         files = []
-        for line in output.splitlines():
+        for i, line in enumerate(output.splitlines()):
             trace_file = CUCMTraceFile.from_file_list_output(line, path)
             if trace_file:
                 files.append(trace_file)
+            else:
+                logger.warning("SDL line %d failed to parse: %r", i, line)
 
         logger.info("Found %d SDL trace files", len(files))
         return files

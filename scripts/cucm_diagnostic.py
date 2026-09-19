@@ -35,7 +35,7 @@ def print_header(title: str) -> None:
 
 
 def print_step(step: str, status: str, details: str = "") -> None:
-    icons = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️", "RUN": "🔄"}
+    icons = {"PASS": "[PASS]", "FAIL": "[FAIL]", "WARN": "[WARN]", "INFO": "[INFO]", "RUN": "[RUN]"}
     icon = icons.get(status, "  ")
     print(f"  {icon} {step:<40} {details}")
 

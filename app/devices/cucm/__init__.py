@@ -8,6 +8,14 @@ from app.devices.cucm.client import CUCMClient
 from app.devices.cucm.collector import CUCMTraceCollector, CollectionResult, CollectorConfig
 from app.devices.cucm.transport import CUCMTransport, NetmikoTransport, TransportConfig, create_transport
 from app.devices.cucm.models import CUCMVersion, CUCMTraceFile
+from app.devices.cucm.selection import (
+    TraceSelectionService,
+    SelectionMode,
+    RelativeTimeOption,
+    SelectionRequest,
+    SelectionResult,
+    create_selection_request,
+)
 from app.devices.cucm.exceptions import (
     CUCMError,
     CUCMConnectionError,
@@ -29,6 +37,12 @@ __all__ = [
     "create_transport",
     "CUCMVersion",
     "CUCMTraceFile",
+    "TraceSelectionService",
+    "SelectionMode",
+    "RelativeTimeOption",
+    "SelectionRequest",
+    "SelectionResult",
+    "create_selection_request",
     "CUCMError",
     "CUCMConnectionError",
     "CUCMAuthenticationError",

@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import Mock, MagicMock, patch
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.devices.cucm.transport import (
     CUCMTransport,
@@ -13,6 +13,14 @@ from app.devices.cucm.transport import (
 from app.devices.cucm.client import CUCMClient
 from app.devices.cucm.collector import CUCMTraceCollector, CollectionResult, CollectorConfig
 from app.devices.cucm.models import CUCMVersion, CUCMTraceFile
+from app.devices.cucm.selection import (
+    TraceSelectionService,
+    SelectionMode,
+    RelativeTimeOption,
+    SelectionRequest,
+    SelectionResult,
+    create_selection_request,
+)
 from app.devices.cucm.exceptions import (
     CUCMConnectionError,
     CUCMAuthenticationError,
@@ -52,6 +60,9 @@ class MockTransport(CUCMTransport):
     def send_command(self, command: str, expect_string: str = None) -> str:
         if not self._connected:
             raise CUCMConnectionError("Not connected")
+        # Handle the new pagination command
+        if "set cli pagination off" in command:
+            return ""
         return self._responses.get(command, f"Output for: {command}")
 
     def send_command_timing(self, command: str, delay_factor: float = 1.0) -> str:
@@ -68,6 +79,7 @@ class MockTransportWithLargeFiles(MockTransport):
 
     def __init__(self, config: TransportConfig, responses: dict = None):
         super().__init__(config, responses)
+        # Full 11 real CUCM SDL files + 1 index file = 12 total
         self._responses = {
             "show version active": """
 Active Master Version: 15.0.1.12900-17
@@ -76,10 +88,19 @@ Build: 12900
 Edition: Standard
 Install Date: 2024-01-15
             """.strip(),
-            "file list activelog/cm/trace/ccm/sdl detail": """
--rw-r--r--  1 admin admin  1024000 Sep 19 10:30 SDL_0001_20240919_103000
--rw-r--r--  1 admin admin  2048000 Sep 19 11:00 SDL_0002_20240919_110000
--rw-r--r--  1 admin admin  52428800 Sep 19 11:30 SDL_LARGE_20240919_113000
+"file list activelog /cm/trace/ccm/sdl detail": """
+19 Sep,2026 05:28:31           34  SDL001_100.index
+03 Sep,2026 23:59:59      385,759  SDL001_100_000001.txt.gz
+04 Sep,2026 05:27:54      968,955  SDL001_100_000002.txt.gz
+04 Sep,2026 10:55:48      973,716  SDL001_100_000003.txt.gz
+04 Sep,2026 16:23:16      964,430  SDL001_100_000004.txt.gz
+04 Sep,2026 21:51:13      969,974  SDL001_100_000005.txt.gz
+04 Sep,2026 23:59:59      377,552  SDL001_100_000006.txt.gz
+05 Sep,2026 05:27:52      968,935  SDL001_100_000007.txt.gz
+05 Sep,2026 10:55:22      957,290  SDL001_100_000008.txt.gz
+05 Sep,2026 16:23:21      969,577  SDL001_100_000009.txt.gz
+05 Sep,2026 21:50:47      971,794  SDL001_100_000010.txt.gz
+05 Sep,2026 23:59:59      382,214  SDL001_100_000011.txt.gz
             """.strip(),
         }
         if responses:
@@ -111,10 +132,19 @@ Build: 12900
 Edition: Standard
 Install Date: 2024-01-15
         """.strip(),
-        "file list activelog/cm/trace/ccm/sdl detail": """
--rw-r--r--  1 admin admin  1024000 Sep 19 10:30 SDL_0001_20240919_103000
--rw-r--r--  1 admin admin  2048000 Sep 19 11:00 SDL_0002_20240919_110000
--rw-r--r--  1 admin admin   512000 Sep 19 11:30 SDL_0003_20240919_113000
+        "file list activelog /cm/trace/ccm/sdl detail": """
+19 Sep,2026 05:28:31           34  SDL001_100.index
+03 Sep,2026 23:59:59      385,759  SDL001_100_000001.txt.gz
+04 Sep,2026 05:27:54      968,955  SDL001_100_000002.txt.gz
+04 Sep,2026 10:55:48      973,716  SDL001_100_000003.txt.gz
+04 Sep,2026 16:23:16      964,430  SDL001_100_000004.txt.gz
+04 Sep,2026 21:51:13      969,974  SDL001_100_000005.txt.gz
+04 Sep,2026 23:59:59      377,552  SDL001_100_000006.txt.gz
+05 Sep,2026 05:27:52      968,935  SDL001_100_000007.txt.gz
+05 Sep,2026 10:55:22      957,290  SDL001_100_000008.txt.gz
+05 Sep,2026 16:23:21      969,577  SDL001_100_000009.txt.gz
+05 Sep,2026 21:50:47      971,794  SDL001_100_000010.txt.gz
+05 Sep,2026 23:59:59      382,214  SDL001_100_000011.txt.gz
         """.strip(),
     }
     return MockTransport(transport_config, responses)
@@ -387,13 +417,39 @@ Install Date: 2024-01-15
 
 
 class TestCUCMTraceFile:
-    def test_from_file_list_output(self):
-        line = "-rw-r--r--  1 admin admin  1024000 Sep 19 10:30 SDL_0001_20240919_103000"
+    def test_from_file_list_output_real_cucm_format(self):
+        """Test parsing real CUCM output format with comma-separated sizes."""
+        line = "03 Sep,2026 23:59:59      385,759  SDL001_100_000001.txt.gz"
         trace_file = CUCMTraceFile.from_file_list_output(line, "activelog/cm/trace/ccm/sdl")
         assert trace_file is not None
-        assert trace_file.filename == "SDL_0001_20240919_103000"
-        assert trace_file.size_bytes == 1024000
-        assert trace_file.path == "activelog/cm/trace/ccm/sdl/SDL_0001_20240919_103000"
+        assert trace_file.filename == "SDL001_100_000001.txt.gz"
+        assert trace_file.size_bytes == 385759
+        assert trace_file.trace_type == "SDL_TRACE"
+        assert trace_file.path == "activelog/cm/trace/ccm/sdl/SDL001_100_000001.txt.gz"
+        # Verify date parsing (year from output)
+        assert trace_file.modified.year == 2026
+        assert trace_file.modified.month == 9
+        assert trace_file.modified.day == 3
+        assert trace_file.modified.hour == 23
+        assert trace_file.modified.minute == 59
+        assert trace_file.modified.second == 59
+
+    def test_from_file_list_output_index_file(self):
+        """Test parsing .index metadata file."""
+        line = "19 Sep,2026 05:28:31           34  SDL001_100.index"
+        trace_file = CUCMTraceFile.from_file_list_output(line, "activelog/cm/trace/ccm/sdl")
+        assert trace_file is not None
+        assert trace_file.filename == "SDL001_100.index"
+        assert trace_file.size_bytes == 34
+        assert trace_file.trace_type == "SDL_INDEX"
+
+    def test_from_file_list_output_txt_file(self):
+        """Test parsing .txt file (uncompressed)."""
+        line = "19 Sep,2026 05:28:31         1024  SDL001_100.txt"
+        trace_file = CUCMTraceFile.from_file_list_output(line, "activelog/cm/trace/ccm/sdl")
+        assert trace_file is not None
+        assert trace_file.filename == "SDL001_100.txt"
+        assert trace_file.trace_type == "SDL_TRACE"
 
     def test_from_file_list_output_skips_headers(self):
         assert CUCMTraceFile.from_file_list_output("====", "path") is None
@@ -419,6 +475,7 @@ class TestCUCMClient:
         assert not cucm_client.is_connected()
         cucm_client.connect()
         assert cucm_client.is_connected()
+        assert cucm_client.get_prompt() == "admin:"
         cucm_client.disconnect()
         assert not cucm_client.is_connected()
 
@@ -440,9 +497,49 @@ class TestCUCMClient:
     def test_list_sdl_files(self, cucm_client):
         cucm_client.connect()
         files = cucm_client.list_sdl_files()
-        assert len(files) == 3
+        # 1 index file + 11 trace files = 12 total
+        assert len(files) == 12
         assert all(isinstance(f, CUCMTraceFile) for f in files)
-        assert files[0].filename == "SDL_0001_20240919_103000"
+        # First file is .index metadata
+        assert files[0].filename == "SDL001_100.index"
+        assert files[0].trace_type == "SDL_INDEX"
+        assert files[0].size_bytes == 34
+        # Remaining are .txt.gz trace files
+        assert files[1].filename == "SDL001_100_000001.txt.gz"
+        assert files[1].trace_type == "SDL_TRACE"
+        assert files[1].size_bytes == 385759
+        # Check last trace file
+        assert files[11].filename == "SDL001_100_000011.txt.gz"
+        assert files[11].trace_type == "SDL_TRACE"
+        assert files[11].size_bytes == 382214
+        # Verify all 11 trace files are SDL_TRACE
+        trace_files = [f for f in files if f.trace_type == "SDL_TRACE"]
+        assert len(trace_files) == 11
+        index_files = [f for f in files if f.trace_type == "SDL_INDEX"]
+        assert len(index_files) == 1
+
+    def test_list_sdl_files_command_format(self, mock_transport):
+        """Verify the exact CUCM CLI command format with space after activelog."""
+        cucm_client = CUCMClient(transport=mock_transport)
+        cucm_client.connect()
+        
+        # Capture the command sent to the transport
+        # We can verify by checking what the mock transport receives
+        # Since mock_transport returns predefined responses, we know the key
+        # must match exactly: "file list activelog /cm/trace/ccm/sdl detail"
+        command_sent = None
+        
+        # The mock transport's send_command is called with the command
+        # We can verify by calling list_sdl_files and checking the mock's
+        # internal _responses dict has the exact key
+        assert "file list activelog /cm/trace/ccm/sdl detail" in mock_transport._responses
+        
+        # Also verify the command is NOT the old format without space
+        assert "file list activelog/cm/trace/ccm/sdl detail" not in mock_transport._responses
+        
+        # Actually call the method to ensure it works
+        files = cucm_client.list_sdl_files()
+        assert len(files) == 12
 
     def test_list_sdl_files_not_connected(self, cucm_client):
         with pytest.raises(CUCMConnectionError):
@@ -479,6 +576,7 @@ class TestCUCMClient:
         assert diag["cucm_version"]["status"] == "PASS"
         assert diag["sdl_directory"]["status"] == "PASS"
         assert diag["sdl_files"]["status"] == "PASS"
+        assert "12 SDL file(s) found" in diag["sdl_files"]["details"]
 
 
 # --- Collector Tests ---
@@ -487,7 +585,8 @@ class TestCUCMTraceCollector:
     def test_collect_via_view(self, cucm_client):
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
-        result = collector.collect_file("SDL_0001_20240919_103000", method="view")
+        # file view only works for uncompressed files
+        result = collector.collect_file("SDL001_100.index", method="view")
         assert result.success
         assert result.method == "view"
         assert result.local_path is not None
@@ -496,18 +595,23 @@ class TestCUCMTraceCollector:
     def test_collect_multiple(self, cucm_client):
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
+        # Only .index files work with view method
         results = collector.collect_multiple([
-            "SDL_0001_20240919_103000",
-            "SDL_0002_20240919_110000",
+            "SDL001_100.index",
+            "SDL001_100_000001.txt.gz",  # This will fail with view
         ], method="view")
         assert len(results) == 2
-        assert all(r.success for r in results)
+        assert results[0].success  # .index works
+        assert not results[1].success  # .gz fails
 
     def test_collect_all_sdl(self, cucm_client):
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
+        # Only .index files work with view method (5 total, 1 .index)
         results = collector.collect_all_sdl(max_files=2, method="view")
         assert len(results) == 2
+        assert results[0].success  # .index
+        assert not results[1].success  # .gz
 
     def test_clear_local_storage(self, cucm_client):
         collector = CUCMTraceCollector(client=cucm_client)
@@ -518,29 +622,28 @@ class TestCUCMTraceCollector:
         """Test that 'get' method returns clear failure (not implemented)."""
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
-        result = collector.collect_file("SDL_0001_20240919_103000", method="get")
+        result = collector.collect_file("SDL001_100_000001.txt.gz", method="get")
         assert not result.success
         assert result.method == "get"
         assert "SFTP-based file get is not yet configured" in result.error
         assert result.local_path is None
 
-    def test_auto_method_large_file_returns_failure(self, cucm_client_large_files):
-        """Test auto method returns failure for large files (get not implemented)."""
-        cucm_client_large_files.connect()
-        # Configure collector with 10MB threshold (default)
-        collector = CUCMTraceCollector(client=cucm_client_large_files)
-        # SDL_LARGE is 50MB (> 10MB threshold)
-        result = collector.collect_file("SDL_LARGE_20240919_113000", method="auto")
+    def test_auto_method_gz_file_returns_failure(self, cucm_client):
+        """Test auto method returns failure for .gz files (get not implemented)."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+        # .gz files should fail with auto (would need get)
+        result = collector.collect_file("SDL001_100_000001.txt.gz", method="auto")
         assert not result.success
         assert result.method == "get"
         assert "SFTP-based file get is not yet configured" in result.error
 
-    def test_auto_method_small_file_uses_view(self, cucm_client_large_files):
-        """Test auto method uses view for small files."""
-        cucm_client_large_files.connect()
-        collector = CUCMTraceCollector(client=cucm_client_large_files)
-        # SDL_0001 is 1MB (< 10MB threshold)
-        result = collector.collect_file("SDL_0001_20240919_103000", method="auto")
+    def test_auto_method_index_file_uses_view(self, cucm_client):
+        """Test auto method uses view for .index files."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+        # .index files work with view
+        result = collector.collect_file("SDL001_100.index", method="auto")
         assert result.success
         assert result.method == "view"
 
@@ -571,15 +674,15 @@ class TestCUCMTraceCollector:
         assert result.method == "validation"
         assert "empty" in result.error.lower()
 
-    def test_custom_large_file_threshold(self, cucm_client_large_files):
-        """Test that large file threshold is configurable."""
-        cucm_client_large_files.connect()
-        # Set threshold to 100MB - SDL_LARGE (50MB) should now use view
+    def test_custom_large_file_threshold(self, cucm_client):
+        """Test that large file threshold is configurable (but .gz still needs get)."""
+        cucm_client.connect()
+        # Even with large threshold, .gz files need get
         config = CollectorConfig(large_file_threshold_mb=100)
-        collector = CUCMTraceCollector(client=cucm_client_large_files, config=config)
-        result = collector.collect_file("SDL_LARGE_20240919_113000", method="auto")
-        assert result.success
-        assert result.method == "view"
+        collector = CUCMTraceCollector(client=cucm_client, config=config)
+        result = collector.collect_file("SDL001_100_000001.txt.gz", method="auto")
+        assert not result.success
+        assert result.method == "get"
 
 
 # --- Exception Tests ---
@@ -683,8 +786,9 @@ class TestCUCMConnectionFlow:
         """file list should execute successfully."""
         cucm_client.connect()
         files = cucm_client.list_sdl_files()
-        assert len(files) == 3
-        assert all(f.filename.startswith("SDL_") for f in files)
+        # 1 index file + 11 trace files = 12 total
+        assert len(files) == 12
+        assert all(f.filename.startswith("SDL") for f in files)
 
     def test_cucm_client_execute_read_only(self, cucm_client):
         """Public execute_read_only method should work."""

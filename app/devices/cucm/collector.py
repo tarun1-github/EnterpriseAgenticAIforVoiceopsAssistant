@@ -10,6 +10,14 @@ from app.core.logging import get_logger
 from app.core.config import get_settings
 from app.devices.cucm.client import CUCMClient
 from app.devices.cucm.models import CUCMTraceFile
+from app.devices.cucm.selection import (
+    TraceSelectionService,
+    SelectionMode,
+    RelativeTimeOption,
+    SelectionRequest,
+    SelectionResult,
+    create_selection_request,
+)
 from app.devices.cucm.exceptions import CUCMTraceCollectionError, CUCMConnectionError
 
 logger = get_logger("devices.cucm.collector")
@@ -42,6 +50,11 @@ class CUCMTraceCollector:
 
     Note: SFTP-based file get is a separate milestone. This collector only supports
     'file view' for now. Attempting 'get' will return a clear failure result.
+
+    Time-based selection:
+    - Latest: newest trace file
+    - Relative: last N minutes/hours
+    - Custom: specific start/end datetime
     """
 
     def __init__(
@@ -56,6 +69,83 @@ class CUCMTraceCollector:
             or Path(tempfile.gettempdir()) / "voiceops_traces"
         )
         self._local_storage.mkdir(parents=True, exist_ok=True)
+        self._selection_service = TraceSelectionService()
+
+    def find_traces(
+        self,
+        mode: str = "latest",
+        relative: Optional[str] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        remote_path: str = "activelog /cm/trace/ccm/sdl",
+    ) -> SelectionResult:
+        """Discover and select trace files matching time criteria.
+
+        This performs discovery and candidate selection ONLY - no files are downloaded.
+
+        Args:
+            mode: "latest", "relative", or "custom"
+            relative: For relative mode, one of:
+                "5 minutes", "10 minutes", "15 minutes", "30 minutes",
+                "1 hour", "2 hours", "4 hours", "8 hours", "12 hours", "24 hours"
+            start: For custom mode, ISO format start datetime (e.g., "2026-09-19T11:00:00")
+            end: For custom mode, ISO format end datetime (e.g., "2026-09-19T11:15:00")
+            remote_path: CUCM directory to search.
+
+        Returns:
+            SelectionResult with candidate files and metadata.
+
+        Raises:
+            CUCMConnectionError: If not connected.
+            ValueError: If parameters are invalid.
+        """
+        if not self._client.is_connected():
+            raise CUCMConnectionError("CUCM client not connected")
+
+        request = create_selection_request(mode, relative, start, end)
+
+        # Discover all SDL files
+        all_files = self._client.list_sdl_files(remote_path)
+        logger.info("Discovered %d total SDL files", len(all_files))
+
+        # Select candidates based on time criteria
+        result = self._selection_service.select_traces(all_files, request)
+
+        logger.info(
+            "Time-based selection: mode=%s, window=%s to %s, candidates=%d, est_size=%.2f MB",
+            mode, result.start_time, result.end_time,
+            result.total_candidates, result.estimated_size_bytes / (1024 * 1024)
+        )
+
+        return result
+
+    def collect_selected_traces(
+        self,
+        selection: SelectionResult,
+        remote_path: str = "activelog /cm/trace/ccm/sdl",
+        method: str = "auto",
+        progress_callback: Optional[Callable[[CollectionResult], None]] = None,
+    ) -> List[CollectionResult]:
+        """Download the previously selected trace files.
+
+        Args:
+            selection: SelectionResult from find_traces().
+            remote_path: CUCM directory.
+            method: "auto", "view", or "get"
+            progress_callback: Optional callback for progress updates.
+
+        Returns:
+            List of CollectionResult for each downloaded file.
+        """
+        if not self._client.is_connected():
+            raise CUCMConnectionError("CUCM client not connected")
+
+        filenames = [f.filename for f in selection.candidate_files]
+        if not filenames:
+            logger.warning("No candidate files to download")
+            return []
+
+        return self.collect_multiple(filenames, remote_path, method, progress_callback)
 
     def _validate_filename(self, filename: str) -> Path:
         """Validate filename and return safe local path.
@@ -114,7 +204,7 @@ class CUCMTraceCollector:
     def collect_file(
         self,
         filename: str,
-        remote_path: str = "activelog/cm/trace/ccm/sdl",
+        remote_path: str = "activelog /cm/trace/ccm/sdl",
         method: str = "auto",
     ) -> CollectionResult:
         """Collect a single SDL trace file.
@@ -144,10 +234,15 @@ class CUCMTraceCollector:
             )
 
         if method == "auto":
-            # Determine best method based on file size
+            # Determine best method based on file size AND file type
             files = self._client.list_sdl_files(remote_path)
             target = next((f for f in files if f.filename == filename), None)
-            if target and target.size_bytes > self._config.large_file_threshold_mb * 1024 * 1024:
+
+            # .gz files MUST use 'get' (SFTP) - file view cannot read compressed files
+            if target and filename.endswith(".gz"):
+                method = "get"
+            # Large files also need 'get'
+            elif target and target.size_bytes > self._config.large_file_threshold_mb * 1024 * 1024:
                 method = "get"
             else:
                 method = "view"
@@ -174,9 +269,24 @@ class CUCMTraceCollector:
     ) -> CollectionResult:
         """Collect file using 'file view' CLI command.
 
-        Limitation: Only works for reasonably sized files.
+        Limitation: Only works for reasonably sized UNCOMPRESSED files.
+        For .txt.gz files, use 'file get' with SFTP (not yet implemented).
         Large files may be truncated or timeout.
         """
+        # Do NOT use file view for compressed .gz files
+        if filename.endswith(".gz"):
+            return CollectionResult(
+                filename=filename,
+                local_path=None,
+                size_bytes=0,
+                success=False,
+                error=(
+                    "Cannot use 'file view' for compressed .gz files. "
+                    "Use method='get' with SFTP (not yet implemented) for .gz files."
+                ),
+                method="view",
+            )
+
         try:
             logger.info("Collecting %s via 'file view'", filename)
             content = self._client.get_sdl_file_content(filename, remote_path)
@@ -235,7 +345,7 @@ class CUCMTraceCollector:
     def collect_multiple(
         self,
         filenames: List[str],
-        remote_path: str = "activelog/cm/trace/ccm/sdl",
+        remote_path: str = "activelog /cm/trace/ccm/sdl",
         method: str = "auto",
         progress_callback: Optional[Callable[[CollectionResult], None]] = None,
     ) -> List[CollectionResult]:
@@ -250,7 +360,7 @@ class CUCMTraceCollector:
 
     def collect_all_sdl(
         self,
-        remote_path: str = "activelog/cm/trace/ccm/sdl",
+        remote_path: str = "activelog /cm/trace/ccm/sdl",
         max_files: Optional[int] = None,
         method: str = "auto",
         progress_callback: Optional[Callable[[CollectionResult], None]] = None,

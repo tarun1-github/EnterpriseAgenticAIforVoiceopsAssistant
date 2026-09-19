@@ -91,22 +91,29 @@ class CUCMTraceFile:
 
     @classmethod
     def from_file_list_output(cls, line: str, base_path: str = "activelog/cm/trace/ccm/sdl") -> Optional["CUCMTraceFile"]:
-        """Parse a single line from 'file list ... detail' output."""
+        """Parse a single line from 'file list ... detail' output.
+
+        Real CUCM output format:
+        19 Sep,2026 05:28:31           34  SDL001_100.index
+        03 Sep,2026 23:59:59      385,759  SDL001_100_000001.txt.gz
+        """
         import re
 
         line = line.strip()
         if not line or line.startswith("====") or "total" in line.lower():
             return None
 
+        # Pattern for real CUCM output:
+        # DD Mon,YYYY HH:MM:SS   SIZE(filename may contain dots)
+        # Examples:
+        # 19 Sep,2026 05:28:31           34  SDL001_100.index
+        # 03 Sep,2026 23:59:59      385,759  SDL001_100_000001.txt.gz
         pattern = re.compile(
-            r"(?P<perms>\S+)\s+"
-            r"(?P<links>\d+)\s+"
-            r"(?P<owner>\S+)\s+"
-            r"(?P<group>\S+)\s+"
-            r"(?P<size>\d+)\s+"
-            r"(?P<month>\w{3})\s+"
             r"(?P<day>\d{1,2})\s+"
-            r"(?P<time>\d{2}:\d{2}|\d{4})\s+"
+            r"(?P<month>\w{3}),"
+            r"(?P<year>\d{4})\s+"
+            r"(?P<time>\d{2}:\d{2}:\d{2})\s+"
+            r"(?P<size>[\d,]+)\s+"
             r"(?P<name>.+)"
         )
 
@@ -114,10 +121,17 @@ class CUCMTraceFile:
         if not match:
             return None
 
-        size = int(match.group("size"))
+        # Parse size (handle comma-separated numbers)
+        size_str = match.group("size").replace(",", "")
+        try:
+            size = int(size_str)
+        except ValueError:
+            return None
+
         name = match.group("name").strip()
-        month_str = match.group("month")
         day = int(match.group("day"))
+        month_str = match.group("month")
+        year = int(match.group("year"))
         time_str = match.group("time")
 
         month_map = {
@@ -126,28 +140,28 @@ class CUCMTraceFile:
         }
         month = month_map.get(month_str, 1)
 
-        current_year = datetime.now().year
         try:
-            if ":" in time_str:
-                hour, minute = map(int, time_str.split(":"))
-                modified = datetime(current_year, month, day, hour, minute)
-            else:
-                year = int(time_str)
-                modified = datetime(year, month, day)
+            hour, minute, second = map(int, time_str.split(":"))
+            modified = datetime(year, month, day, hour, minute, second)
         except ValueError:
             modified = datetime.now()
 
         full_path = f"{base_path}/{name}"
+
+        # Determine trace type
+        trace_type = "SDL"
+        if name.endswith(".index"):
+            trace_type = "SDL_INDEX"
+        elif name.endswith(".txt.gz") or name.endswith(".txt"):
+            trace_type = "SDL_TRACE"
 
         return cls(
             filename=name,
             path=full_path,
             size_bytes=size,
             modified=modified,
-            trace_type="SDL",
+            trace_type=trace_type,
             raw_metadata={
-                "permissions": match.group("perms"),
-                "owner": match.group("owner"),
-                "group": match.group("group"),
+                "permissions": "file",
             },
         )

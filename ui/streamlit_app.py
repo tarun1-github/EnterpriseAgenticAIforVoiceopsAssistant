@@ -2,6 +2,7 @@
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import List
 
@@ -17,7 +18,7 @@ from app.analysis.evidence_builder import build_evidence_pack
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.correlation.engine import CorrelationEngine
-from app.devices.cucm import CUCMClient, CUCMTraceCollector
+from app.devices.cucm import CUCMClient, CUCMTraceCollector, TraceSelectionService, SelectionMode, RelativeTimeOption
 from app.models.call_session import CallSession
 from app.models.event import DirectionEnum, ProtocolEnum, VoiceEvent
 from app.parsers.detector import detect_protocol
@@ -211,6 +212,88 @@ def main():
                         st.success(f"Diagnostic: {diag['overall']}")
                     except Exception as e:
                         st.error(f"Failed: {e}")
+
+            st.markdown("---")
+            st.subheader("⏱️ CUCM Trace Collection")
+            
+            # Collection Mode
+            collection_mode = st.radio(
+                "Collection Mode",
+                ["Latest Trace", "Relative Time", "Custom Time Range"],
+                key="cucm_collection_mode",
+                horizontal=False,
+            )
+            
+            if collection_mode == "Relative Time":
+                relative_options = [
+                    "5 minutes", "10 minutes", "15 minutes", "30 minutes",
+                    "1 hour", "2 hours", "4 hours", "8 hours", "12 hours", "24 hours"
+                ]
+                selected_relative = st.selectbox(
+                    "Time Window",
+                    relative_options,
+                    index=2,  # Default to 15 minutes
+                    key="cucm_relative_time",
+                )
+                # Show calculated window
+                end_time = datetime.now()
+                start_time = end_time - RelativeTimeOption.from_string(selected_relative).value
+                st.caption(f"Window: {start_time.strftime('%Y-%m-%d %H:%M:%S')} → {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            elif collection_mode == "Custom Time Range":
+                col_start, col_end = st.columns(2)
+                with col_start:
+                    start_date = st.date_input("Start Date", value=datetime.now(), key="cucm_start_date")
+                    start_time_input = st.time_input("Start Time", value=datetime.now().replace(minute=0, second=0), key="cucm_start_time")
+                with col_end:
+                    end_date = st.date_input("End Date", value=datetime.now(), key="cucm_end_date")
+                    end_time_input = st.time_input("End Time", value=datetime.now(), key="cucm_end_time")
+                
+                start_dt = datetime.combine(start_date, start_time_input)
+                end_dt = datetime.combine(end_date, end_time_input)
+                
+                if start_dt >= end_dt:
+                    st.error("⚠️ Start must be before End")
+                elif end_dt > datetime.now():
+                    st.error("⚠️ End cannot be in the future")
+                else:
+                    st.caption(f"Window: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} → {end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            elif collection_mode == "Latest Trace":
+                st.caption("Will select the newest available SDL trace file.")
+            
+            # Find Matching Traces button
+            if st.button("🔍 Find Matching Traces", use_container_width=True):
+                if not cucm_client.is_connected():
+                    with st.spinner("Connecting to CUCM..."):
+                        try:
+                            cucm_client.connect()
+                        except Exception as e:
+                            st.error(f"Connection failed: {e}")
+                            st.stop()
+                
+                with st.spinner("Discovering and selecting traces..."):
+                    try:
+                        collector = CUCMTraceCollector(client=cucm_client)
+                        
+                        if collection_mode == "Latest Trace":
+                            selection = collector.find_traces(mode="latest")
+                        elif collection_mode == "Relative Time":
+                            selection = collector.find_traces(mode="relative", relative=selected_relative)
+                        elif collection_mode == "Custom Time Range":
+                            if start_dt >= end_dt or end_dt > datetime.now():
+                                st.error("Invalid time range")
+                                st.stop()
+                            selection = collector.find_traces(
+                                mode="custom",
+                                start=start_dt.isoformat(),
+                                end=end_dt.isoformat(),
+                            )
+                        
+                        st.session_state["cucm_trace_selection"] = selection.to_dict()
+                        st.success(f"Found {selection.total_candidates} candidate file(s) ({selection.estimated_size_mb:.2f} MB)")
+                    except Exception as e:
+                        st.error(f"Selection failed: {e}")
 
         st.markdown("---")
         st.subheader("Quick Actions")
@@ -656,6 +739,108 @@ def main():
 
                 overall_icon = "✅" if diag.get("overall") == "READY" else "⚠️" if diag.get("overall") == "PARTIAL" else "❌"
                 st.markdown(f"**Overall: {overall_icon} {diag.get('overall', 'UNKNOWN')}**")
+
+            # Time-based Trace Selection Results
+            if "cucm_trace_selection" in st.session_state:
+                selection = st.session_state["cucm_trace_selection"]
+                st.markdown("---")
+                st.markdown("#### ⏱️ Trace Selection Result")
+                
+                req = selection.get("request", {})
+                mode = req.get("mode", "unknown")
+                st.markdown(f"**Mode:** `{mode}`")
+                
+                start_time = selection.get("start_time")
+                end_time = selection.get("end_time")
+                if start_time and end_time:
+                    st.markdown(f"**Requested Window:** `{start_time}` → `{end_time}`")
+                
+                candidates = selection.get("candidate_files", [])
+                total_candidates = selection.get("total_candidates", 0)
+                est_size_mb = selection.get("estimated_size_mb", 0)
+                
+                st.markdown(f"**Candidate Files:** {total_candidates}  |  **Estimated Size:** {est_size_mb:.2f} MB")
+                
+                if candidates:
+                    # Show candidate files with checkboxes for selection
+                    st.markdown("##### Candidate Files")
+                    
+                    # Initialize selection state for checkboxes
+                    if "cucm_selected_candidates" not in st.session_state:
+                        st.session_state["cucm_selected_candidates"] = set()
+                    
+                    selected_candidates = set()
+                    for i, f in enumerate(candidates):
+                        col_check, col_info = st.columns([1, 10])
+                        with col_check:
+                            checked = st.checkbox(
+                                "",
+                                key=f"cucm_candidate_{i}",
+                                value=f["filename"] in st.session_state["cucm_selected_candidates"],
+                            )
+                            if checked:
+                                selected_candidates.add(f["filename"])
+                        with col_info:
+                            st.markdown(
+                                f"`{f['filename']}`  "
+                                f"({f['size_mb']:.2f} MB, "
+                                f"Modified: {f['modified']}, "
+                                f"Type: {f['trace_type']})"
+                            )
+                    
+                    # Update session state with selected candidates
+                    st.session_state["cucm_selected_candidates"] = selected_candidates
+                    
+                    # Download Selected Traces button
+                    if selected_candidates:
+                        if st.button("📥 Download Selected Traces", type="primary"):
+                            if not cucm_client.is_connected():
+                                with st.spinner("Connecting to CUCM..."):
+                                    try:
+                                        cucm_client.connect()
+                                    except Exception as e:
+                                        st.error(f"Connection failed: {e}")
+                                        st.stop()
+                            
+                            collector = CUCMTraceCollector(client=cucm_client)
+                            candidate_files = [f for f in candidates if f["filename"] in selected_candidates]
+                            
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            results = []
+                            
+                            def update_progress(result):
+                                results.append(result)
+                                status_text.text(f"Collected: {result.filename} ({'✅' if result.success else '❌'})")
+                            
+                            with st.spinner(f"Collecting {len(candidate_files)} file(s)..."):
+                                filenames = [f["filename"] for f in candidate_files]
+                                collected = collector.collect_multiple(
+                                    filenames,
+                                    progress_callback=update_progress,
+                                )
+                                progress_bar.progress(1.0)
+                            
+                            success_count = sum(1 for r in collected if r.success)
+                            st.success(f"Collected {success_count}/{len(collected)} files successfully")
+                            
+                            # Auto-ingest collected files
+                            if success_count > 0:
+                                if st.button("🔄 Ingest Collected Traces"):
+                                    ingestion_engine = get_ingestion_engine()
+                                    correlation_engine = get_correlation_engine()
+                                    all_events = []
+                                    for result in collected:
+                                        if result.success and result.local_path:
+                                            content = result.local_path.read_text(encoding="utf-8", errors="replace")
+                                            events = ingestion_engine.ingest_content(content, source=result.filename)
+                                            all_events.extend(events)
+                                    
+                                    sessions = correlation_engine.correlate(all_events)
+                                    st.session_state["parsed_events"] = all_events
+                                    st.session_state["correlated_sessions"] = sessions
+                                    st.success(f"Ingested {len(all_events)} events into {len(sessions)} session(s)")
+                                    st.rerun()
 
             # SDL Files
             if "cucm_sdl_files" in st.session_state:
