@@ -239,7 +239,8 @@ class CUCMTraceCollector:
             target = next((f for f in files if f.filename == filename), None)
 
             # .gz files MUST use 'get' (SFTP) - file view cannot read compressed files
-            if target and filename.endswith(".gz"):
+            # .gzo and .txt files can use 'view' (they are plain text)
+            if target and filename.endswith(".gz") and not filename.endswith(".gzo"):
                 method = "get"
             # Large files also need 'get'
             elif target and target.size_bytes > self._config.large_file_threshold_mb * 1024 * 1024:
@@ -272,9 +273,12 @@ class CUCMTraceCollector:
         Limitation: Only works for reasonably sized UNCOMPRESSED files.
         For .txt.gz files, use 'file get' with SFTP (not yet implemented).
         Large files may be truncated or timeout.
+        
+        .txt.gzo and .txt files are plain text and can be collected via view.
+        .txt.gz files are compressed and require 'file get' with SFTP.
         """
-        # Do NOT use file view for compressed .gz files
-        if filename.endswith(".gz"):
+        # Do NOT use file view for compressed .gz files (but allow .gzo which is plain text)
+        if filename.endswith(".gz") and not filename.endswith(".gzo"):
             return CollectionResult(
                 filename=filename,
                 local_path=None,

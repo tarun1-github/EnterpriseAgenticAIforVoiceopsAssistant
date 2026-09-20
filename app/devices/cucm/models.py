@@ -152,7 +152,7 @@ class CUCMTraceFile:
         trace_type = "SDL"
         if name.endswith(".index"):
             trace_type = "SDL_INDEX"
-        elif name.endswith(".txt.gz") or name.endswith(".txt"):
+        elif name.endswith(".txt.gzo") or name.endswith(".txt.gz") or name.endswith(".txt"):
             trace_type = "SDL_TRACE"
 
         return cls(

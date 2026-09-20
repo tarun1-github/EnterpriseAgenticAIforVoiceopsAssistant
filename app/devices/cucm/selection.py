@@ -114,6 +114,11 @@ class SelectionResult:
     total_candidates: int
     estimated_size_bytes: int
 
+    @property
+    def estimated_size_mb(self) -> float:
+        """Estimated size in megabytes."""
+        return round(self.estimated_size_bytes / (1024 * 1024), 2)
+
     def to_dict(self) -> dict:
         return {
             "mode": self.request.mode.value,
@@ -208,12 +213,17 @@ class TraceSelectionService:
 
         A file is a candidate if:
         - Its modified time falls within the window, OR
-        - It's the file immediately before the window start (boundary crossing)
+        - It's the file immediately before the window start and the next file
+          is within the window (boundary crossing - the file's end overlaps
+          with the window start).
+
+        Files are sorted by actual parsed CUCM timestamp (NOT filename sequence).
+        Sequence numbers wrap and must NOT be used for ordering.
         """
         if not trace_files:
             return []
 
-        # Sort by modified time
+        # Sort by modified time (chronological order using parsed timestamps)
         sorted_files = sorted(trace_files, key=lambda f: f.modified)
 
         candidates = []
@@ -224,38 +234,19 @@ class TraceSelectionService:
             # File falls within window
             if start_time <= file_time <= end_time:
                 candidates.append(file)
-            # File is just before window - include for boundary crossing
+            # File is just before window - check for boundary crossing
             elif file_time < start_time:
                 # Check if this is the last file before the window
                 next_idx = i + 1
                 if next_idx < len(sorted_files):
                     next_file_time = sorted_files[next_idx].modified
+                    # Boundary crossing: next file is in window, so this file
+                    # may contain records that extend into the window
                     if next_file_time >= start_time:
-                        # This file ends where next file begins - include it
-                        candidates.append(file)
-                else:
-                    # Last file overall but before window - include if close
-                    if (start_time - file_time) <= timedelta(hours=1):
                         candidates.append(file)
 
-        # If no files in window, include the closest ones
-        if not candidates:
-            # Find closest file to the window
-            closest_before = None
-            closest_after = None
-
-            for f in sorted_files:
-                if f.modified < start_time:
-                    if closest_before is None or f.modified > closest_before.modified:
-                        closest_before = f
-                elif f.modified > end_time:
-                    if closest_after is None or f.modified < closest_after.modified:
-                        closest_after = f
-
-            if closest_before:
-                candidates.append(closest_before)
-            if closest_after:
-                candidates.append(closest_after)
+        # NO fallback to "closest before" - if no files overlap the window,
+        # return empty list. The caller should handle zero candidates.
 
         return candidates
 

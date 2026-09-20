@@ -79,7 +79,7 @@ class MockTransportWithLargeFiles(MockTransport):
 
     def __init__(self, config: TransportConfig, responses: dict = None):
         super().__init__(config, responses)
-        # Full 11 real CUCM SDL files + 1 index file = 12 total
+        # Full 11 real CUCM SDL files + 1 index file + 1 gzo file = 13 total
         self._responses = {
             "show version active": """
 Active Master Version: 15.0.1.12900-17
@@ -88,7 +88,7 @@ Build: 12900
 Edition: Standard
 Install Date: 2024-01-15
             """.strip(),
-"file list activelog /cm/trace/ccm/sdl detail": """
+            "file list activelog /cm/trace/ccm/sdl detail": """
 19 Sep,2026 05:28:31           34  SDL001_100.index
 03 Sep,2026 23:59:59      385,759  SDL001_100_000001.txt.gz
 04 Sep,2026 05:27:54      968,955  SDL001_100_000002.txt.gz
@@ -101,6 +101,7 @@ Install Date: 2024-01-15
 05 Sep,2026 16:23:21      969,577  SDL001_100_000009.txt.gz
 05 Sep,2026 21:50:47      971,794  SDL001_100_000010.txt.gz
 05 Sep,2026 23:59:59      382,214  SDL001_100_000011.txt.gz
+19 Sep,2026 12:56:08    5,239,770  SDL001_100_000079.txt.gzo
             """.strip(),
         }
         if responses:
@@ -145,6 +146,7 @@ Install Date: 2024-01-15
 05 Sep,2026 16:23:21      969,577  SDL001_100_000009.txt.gz
 05 Sep,2026 21:50:47      971,794  SDL001_100_000010.txt.gz
 05 Sep,2026 23:59:59      382,214  SDL001_100_000011.txt.gz
+19 Sep,2026 12:56:08    5,239,770  SDL001_100_000079.txt.gzo
         """.strip(),
     }
     return MockTransport(transport_config, responses)
@@ -434,6 +436,23 @@ class TestCUCMTraceFile:
         assert trace_file.modified.minute == 59
         assert trace_file.modified.second == 59
 
+    def test_from_file_list_output_gzo_file(self):
+        """Test parsing .txt.gzo file (active/plain text SDL trace)."""
+        line = "19 Sep,2026 12:56:08    5,239,770  SDL001_100_000079.txt.gzo"
+        trace_file = CUCMTraceFile.from_file_list_output(line, "activelog/cm/trace/ccm/sdl")
+        assert trace_file is not None
+        assert trace_file.filename == "SDL001_100_000079.txt.gzo"
+        assert trace_file.size_bytes == 5239770
+        assert trace_file.trace_type == "SDL_TRACE"
+        assert trace_file.path == "activelog/cm/trace/ccm/sdl/SDL001_100_000079.txt.gzo"
+        # Verify date parsing
+        assert trace_file.modified.year == 2026
+        assert trace_file.modified.month == 9
+        assert trace_file.modified.day == 19
+        assert trace_file.modified.hour == 12
+        assert trace_file.modified.minute == 56
+        assert trace_file.modified.second == 8
+
     def test_from_file_list_output_index_file(self):
         """Test parsing .index metadata file."""
         line = "19 Sep,2026 05:28:31           34  SDL001_100.index"
@@ -497,8 +516,8 @@ class TestCUCMClient:
     def test_list_sdl_files(self, cucm_client):
         cucm_client.connect()
         files = cucm_client.list_sdl_files()
-        # 1 index file + 11 trace files = 12 total
-        assert len(files) == 12
+        # 1 index file + 11 .gz trace files + 1 .gzo trace file = 13 total
+        assert len(files) == 13
         assert all(isinstance(f, CUCMTraceFile) for f in files)
         # First file is .index metadata
         assert files[0].filename == "SDL001_100.index"
@@ -508,13 +527,13 @@ class TestCUCMClient:
         assert files[1].filename == "SDL001_100_000001.txt.gz"
         assert files[1].trace_type == "SDL_TRACE"
         assert files[1].size_bytes == 385759
-        # Check last trace file
-        assert files[11].filename == "SDL001_100_000011.txt.gz"
-        assert files[11].trace_type == "SDL_TRACE"
-        assert files[11].size_bytes == 382214
-        # Verify all 11 trace files are SDL_TRACE
+        # Check the .gzo file (last in list)
+        assert files[12].filename == "SDL001_100_000079.txt.gzo"
+        assert files[12].trace_type == "SDL_TRACE"
+        assert files[12].size_bytes == 5239770
+        # Verify all trace files
         trace_files = [f for f in files if f.trace_type == "SDL_TRACE"]
-        assert len(trace_files) == 11
+        assert len(trace_files) == 12  # 11 .gz + 1 .gzo
         index_files = [f for f in files if f.trace_type == "SDL_INDEX"]
         assert len(index_files) == 1
 
@@ -539,7 +558,7 @@ class TestCUCMClient:
         
         # Actually call the method to ensure it works
         files = cucm_client.list_sdl_files()
-        assert len(files) == 12
+        assert len(files) == 13
 
     def test_list_sdl_files_not_connected(self, cucm_client):
         with pytest.raises(CUCMConnectionError):
@@ -576,7 +595,7 @@ class TestCUCMClient:
         assert diag["cucm_version"]["status"] == "PASS"
         assert diag["sdl_directory"]["status"] == "PASS"
         assert diag["sdl_files"]["status"] == "PASS"
-        assert "12 SDL file(s) found" in diag["sdl_files"]["details"]
+        assert "13 SDL file(s) found" in diag["sdl_files"]["details"]
 
 
 # --- Collector Tests ---
@@ -638,6 +657,15 @@ class TestCUCMTraceCollector:
         assert result.method == "get"
         assert "SFTP-based file get is not yet configured" in result.error
 
+    def test_auto_method_gzo_file_uses_view(self, cucm_client):
+        """Test auto method uses view for .gzo files (plain text)."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+        # .gzo files are plain text and work with view
+        result = collector.collect_file("SDL001_100_000079.txt.gzo", method="auto")
+        assert result.success
+        assert result.method == "view"
+
     def test_auto_method_index_file_uses_view(self, cucm_client):
         """Test auto method uses view for .index files."""
         cucm_client.connect()
@@ -646,6 +674,25 @@ class TestCUCMTraceCollector:
         result = collector.collect_file("SDL001_100.index", method="auto")
         assert result.success
         assert result.method == "view"
+
+    def test_gzo_file_not_rejected_by_view(self, cucm_client):
+        """Test that .gzo files are NOT rejected by _collect_via_view."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+        # .gzo files should work with view (they are plain text)
+        result = collector.collect_file("SDL001_100_000079.txt.gzo", method="view")
+        assert result.success
+        assert result.method == "view"
+
+    def test_gz_file_still_rejected_by_view(self, cucm_client):
+        """Test that .gz files are still rejected by view."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+        # .gz files should fail with view
+        result = collector.collect_file("SDL001_100_000001.txt.gz", method="view")
+        assert not result.success
+        assert result.method == "view"
+        assert "compressed" in result.error.lower()
 
     def test_filename_validation_rejects_path_traversal(self, cucm_client):
         """Test that path traversal attempts are rejected."""
@@ -683,6 +730,219 @@ class TestCUCMTraceCollector:
         result = collector.collect_file("SDL001_100_000001.txt.gz", method="auto")
         assert not result.success
         assert result.method == "get"
+
+
+# --- Collector Selection Tests ---
+
+class TestCUCMCollectorSelection:
+    """Tests for collect_selected_traces and selection-based collection."""
+
+    def test_collect_selected_traces_uses_selection_result(self, cucm_client):
+        """collect_selected_traces should download only candidate files from SelectionResult."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+
+        # Create a SelectionResult with specific files
+        from app.devices.cucm.selection import SelectionResult, SelectionRequest, SelectionMode
+        from app.devices.cucm.models import CUCMTraceFile
+        from datetime import datetime
+
+        # Create trace file objects for selection
+        trace_files = [
+            CUCMTraceFile(
+                filename="SDL001_100_000079.txt.gzo",
+                path="activelog/cm/trace/ccm/sdl/SDL001_100_000079.txt.gzo",
+                size_bytes=5239770,
+                modified=datetime(2026, 9, 19, 12, 56, 8),
+                trace_type="SDL_TRACE",
+            ),
+            CUCMTraceFile(
+                filename="SDL001_100_000001.txt.gz",
+                path="activelog/cm/trace/ccm/sdl/SDL001_100_000001.txt.gz",
+                size_bytes=385759,
+                modified=datetime(2026, 9, 3, 23, 59, 59),
+                trace_type="SDL_TRACE",
+            ),
+        ]
+
+        selection = SelectionResult(
+            request=SelectionRequest(mode=SelectionMode.LATEST),
+            candidate_files=trace_files,
+            start_time=datetime(2026, 9, 19, 12, 0, 0),
+            end_time=datetime(2026, 9, 19, 13, 0, 0),
+            total_candidates=2,
+            estimated_size_bytes=5625529,
+        )
+
+        # Call collect_selected_traces - it should only try to download the selected files
+        results = collector.collect_selected_traces(selection)
+
+        assert len(results) == 2
+        # .gzo should succeed (view), .gz should fail (get not implemented)
+        gzo_result = next(r for r in results if r.filename.endswith(".gzo"))
+        gz_result = next(r for r in results if r.filename.endswith(".gz") and not r.filename.endswith(".gzo"))
+
+        assert gzo_result.success is True
+        assert gzo_result.method == "view"
+        assert gz_result.success is False
+        assert gz_result.method == "get"
+        assert "SFTP-based file get is not yet configured" in gz_result.error
+
+    def test_collect_selected_traces_empty_selection(self, cucm_client):
+        """collect_selected_traces with empty candidate list should return empty list."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+
+        from app.devices.cucm.selection import SelectionResult, SelectionRequest, SelectionMode
+        from datetime import datetime
+
+        selection = SelectionResult(
+            request=SelectionRequest(mode=SelectionMode.LATEST),
+            candidate_files=[],
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+            total_candidates=0,
+            estimated_size_bytes=0,
+        )
+
+        results = collector.collect_selected_traces(selection)
+        assert results == []
+
+    def test_collect_selected_traces_excludes_index_files(self, cucm_client):
+        """collect_selected_traces should not include .index files even if in selection."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+
+        from app.devices.cucm.selection import SelectionResult, SelectionRequest, SelectionMode
+        from app.devices.cucm.models import CUCMTraceFile
+        from datetime import datetime
+
+        trace_files = [
+            CUCMTraceFile(
+                filename="SDL001_100.index",
+                path="activelog/cm/trace/ccm/sdl/SDL001_100.index",
+                size_bytes=34,
+                modified=datetime(2026, 9, 19, 5, 28, 31),
+                trace_type="SDL_INDEX",
+            ),
+        ]
+
+        selection = SelectionResult(
+            request=SelectionRequest(mode=SelectionMode.LATEST),
+            candidate_files=trace_files,
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+            total_candidates=1,
+            estimated_size_bytes=34,
+        )
+
+        results = collector.collect_selected_traces(selection)
+        # .index files can be collected via view but are typically not selected
+        # The selection service already filters them out, but verify behavior
+        assert len(results) == 1
+        assert results[0].filename == "SDL001_100.index"
+        assert results[0].success is True  # .index files work with view
+
+    def test_gzo_file_downloaded_as_plain_text(self, cucm_client):
+        """.gzo files should be downloaded as plain text without gzip extraction."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+
+        # Collect a .gzo file directly
+        result = collector.collect_file("SDL001_100_000079.txt.gzo", method="view")
+
+        assert result.success is True
+        assert result.method == "view"
+        assert result.local_path is not None
+        assert result.local_path.exists()
+        # Content should be readable as text (not gzipped)
+        content = result.local_path.read_text(encoding="utf-8", errors="replace")
+        assert len(content) > 0
+        # Should not be gzip compressed (no gzip magic bytes)
+        assert not content.startswith("\x1f\x8b")
+
+    def test_gz_file_not_downloaded_via_view(self, cucm_client):
+        """.gz files should fail when using view method (require get/SFTP)."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+
+        result = collector.collect_file("SDL001_100_000001.txt.gz", method="view")
+
+        assert result.success is False
+        assert result.method == "view"
+        assert "compressed" in result.error.lower()
+
+    def test_gz_file_requires_get_method(self, cucm_client):
+        """.gz files should fail with get method (not yet implemented)."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+
+        result = collector.collect_file("SDL001_100_000001.txt.gz", method="get")
+
+        assert result.success is False
+        assert result.method == "get"
+        assert "SFTP-based file get is not yet configured" in result.error
+
+    def test_index_file_cannot_be_selected_in_ui(self, mock_transport):
+        """Test that .index files are marked as non-selectable in candidate data."""
+        from app.devices.cucm.client import CUCMClient
+        cucm_client = CUCMClient(transport=mock_transport)
+        cucm_client.connect()
+
+        # Get files and verify .index is in the list
+        files = cucm_client.list_sdl_files()
+        index_files = [f for f in files if f.filename.endswith(".index")]
+        trace_files = [f for f in files if f.trace_type == "SDL_TRACE"]
+
+        assert len(index_files) == 1
+        assert index_files[0].filename == "SDL001_100.index"
+        assert index_files[0].trace_type == "SDL_INDEX"
+
+        # Trace files should not include .index
+        for f in trace_files:
+            assert f.trace_type == "SDL_TRACE"
+            assert not f.filename.endswith(".index")
+
+    def test_download_result_structure(self, cucm_client):
+        """Test that CollectionResult has all required fields for UI display."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+
+        result = collector.collect_file("SDL001_100_000079.txt.gzo", method="view")
+
+        assert result.success is True
+        assert result.filename == "SDL001_100_000079.txt.gzo"
+        assert result.local_path is not None
+        assert result.size_bytes > 0
+        assert result.method == "view"
+        assert result.error is None
+
+        # Verify local file exists and size matches
+        assert result.local_path.exists()
+        local_size = result.local_path.stat().st_size
+        assert local_size == result.size_bytes
+
+    def test_collect_multiple_preserves_order(self, cucm_client):
+        """collect_multiple should return results in same order as input filenames."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+
+        filenames = [
+            "SDL001_100_000079.txt.gzo",
+            "SDL001_100_000001.txt.gz",
+            "SDL001_100.index",
+        ]
+
+        results = collector.collect_multiple(filenames, method="auto")
+
+        assert len(results) == 3
+        assert results[0].filename == "SDL001_100_000079.txt.gzo"
+        assert results[1].filename == "SDL001_100_000001.txt.gz"
+        assert results[2].filename == "SDL001_100.index"
+        # First should succeed (.gzo via view), second fail (.gz needs get), third succeed (.index via view)
+        assert results[0].success is True
+        assert results[1].success is False
+        assert results[2].success is True
 
 
 # --- Exception Tests ---
@@ -786,8 +1046,8 @@ class TestCUCMConnectionFlow:
         """file list should execute successfully."""
         cucm_client.connect()
         files = cucm_client.list_sdl_files()
-        # 1 index file + 11 trace files = 12 total
-        assert len(files) == 12
+        # 1 index file + 11 .gz trace files + 1 .gzo trace file = 13 total
+        assert len(files) == 13
         assert all(f.filename.startswith("SDL") for f in files)
 
     def test_cucm_client_execute_read_only(self, cucm_client):

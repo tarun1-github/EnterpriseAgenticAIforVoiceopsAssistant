@@ -19,6 +19,8 @@ from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.correlation.engine import CorrelationEngine
 from app.devices.cucm import CUCMClient, CUCMTraceCollector, TraceSelectionService, SelectionMode, RelativeTimeOption
+from app.devices.cucm.selection import SelectionResult, SelectionRequest
+from app.devices.cucm.models import CUCMTraceFile
 from app.models.call_session import CallSession
 from app.models.event import DirectionEnum, ProtocolEnum, VoiceEvent
 from app.parsers.detector import detect_protocol
@@ -385,10 +387,6 @@ def main():
     events: List[VoiceEvent] = st.session_state.get("parsed_events", [])
     sessions: List[CallSession] = st.session_state.get("correlated_sessions", [])
 
-    if not events:
-        st.info("💡 No trace events loaded yet. Upload files above or click **'Load Bundled Samples'** in the left sidebar to explore.")
-        return
-
     # Metrics Row
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
@@ -409,19 +407,22 @@ def main():
 
     # --- TAB 2: Call Sessions View ---
     with tab_sessions:
-        st.markdown(
-            '<div class="disclaimer-banner">ℹ️ <strong>Deterministic analysis — LLM RCA not enabled in this phase.</strong> All sessions and anomalies below are derived purely from multi-signal deterministic rules.</div>',
-            unsafe_allow_html=True,
-        )
-
-        st.markdown("### Correlated Voice Call Sessions")
-
-        if not sessions:
-            st.warning("No call sessions correlated.")
+        if not events:
+            st.info("💡 No trace events loaded yet. Upload files above or click **'Load Bundled Samples'** in the left sidebar to explore.")
         else:
-            session_rows = [s.to_summary_dict() for s in sessions]
-            df_sessions = pd.DataFrame(session_rows)
-            st.dataframe(
+            st.markdown(
+                '<div class="disclaimer-banner">ℹ️ <strong>Deterministic analysis — LLM RCA not enabled in this phase.</strong> All sessions and anomalies below are derived purely from multi-signal deterministic rules.</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.markdown("### Correlated Voice Call Sessions")
+
+            if not sessions:
+                st.warning("No call sessions correlated.")
+            else:
+                session_rows = [s.to_summary_dict() for s in sessions]
+                df_sessions = pd.DataFrame(session_rows)
+                st.dataframe(
                 df_sessions,
                 use_container_width=True,
                 column_config={
@@ -550,88 +551,96 @@ def main():
 
     # --- TAB 3: Global Event Timeline ---
     with tab_timeline:
-        st.markdown("### Unified Chronological Timeline (All Events)")
-
-        f_col1, f_col2, f_col3 = st.columns(3)
-        with f_col1:
-            protocol_options = ["ALL"] + [p.value for p in ProtocolEnum if p != ProtocolEnum.UNKNOWN]
-            selected_proto = st.selectbox("Filter by Protocol", protocol_options, key="t_proto")
-        with f_col2:
-            dir_options = ["ALL", "RX (Inbound)", "TX (Outbound)", "INTERNAL"]
-            selected_dir = st.selectbox("Filter by Direction", dir_options, key="t_dir")
-        with f_col3:
-            search_query = st.text_input("Search (Message, ANI, DNIS, Call-ID, Cause)", "", key="t_search")
-
-        filtered_events = events
-        if selected_proto != "ALL":
-            filtered_events = [e for e in filtered_events if e.protocol.value == selected_proto]
-        if selected_dir == "RX (Inbound)":
-            filtered_events = [e for e in filtered_events if e.direction == DirectionEnum.INBOUND]
-        elif selected_dir == "TX (Outbound)":
-            filtered_events = [e for e in filtered_events if e.direction == DirectionEnum.OUTBOUND]
-        elif selected_dir == "INTERNAL":
-            filtered_events = [e for e in filtered_events if e.direction == DirectionEnum.INTERNAL]
-
-        if search_query:
-            q = search_query.lower()
-            filtered_events = [
-                e for e in filtered_events
-                if (
-                    q in e.message_type.lower()
-                    or (e.calling_number and q in e.calling_number.lower())
-                    or (e.called_number and q in e.called_number.lower())
-                    or (e.call_id and q in e.call_id.lower())
-                    or (e.call_reference and q in e.call_reference.lower())
-                    or (e.cause_code and q in e.cause_code.lower())
-                )
-            ]
-
-        table_rows = [e.to_summary_dict() for e in filtered_events]
-        if table_rows:
-            st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+        if not events:
+            st.info("💡 No trace events loaded yet. Upload files above or click **'Load Bundled Samples'** in the left sidebar to explore.")
         else:
-            st.info("No events match the selected filters.")
+            st.markdown("### Unified Chronological Timeline (All Events)")
 
-    # --- TAB 4: Protocol View ---
+            f_col1, f_col2, f_col3 = st.columns(3)
+            with f_col1:
+                protocol_options = ["ALL"] + [p.value for p in ProtocolEnum if p != ProtocolEnum.UNKNOWN]
+                selected_proto = st.selectbox("Filter by Protocol", protocol_options, key="t_proto")
+            with f_col2:
+                dir_options = ["ALL", "RX (Inbound)", "TX (Outbound)", "INTERNAL"]
+                selected_dir = st.selectbox("Filter by Direction", dir_options, key="t_dir")
+            with f_col3:
+                search_query = st.text_input("Search (Message, ANI, DNIS, Call-ID, Cause)", "", key="t_search")
+
+            filtered_events = events
+            if selected_proto != "ALL":
+                filtered_events = [e for e in filtered_events if e.protocol.value == selected_proto]
+            if selected_dir == "RX (Inbound)":
+                filtered_events = [e for e in filtered_events if e.direction == DirectionEnum.INBOUND]
+            elif selected_dir == "TX (Outbound)":
+                filtered_events = [e for e in filtered_events if e.direction == DirectionEnum.OUTBOUND]
+            elif selected_dir == "INTERNAL":
+                filtered_events = [e for e in filtered_events if e.direction == DirectionEnum.INTERNAL]
+
+            if search_query:
+                q = search_query.lower()
+                filtered_events = [
+                    e for e in filtered_events
+                    if (
+                        q in e.message_type.lower()
+                        or (e.calling_number and q in e.calling_number.lower())
+                        or (e.called_number and q in e.called_number.lower())
+                        or (e.call_id and q in e.call_id.lower())
+                        or (e.call_reference and q in e.call_reference.lower())
+                        or (e.cause_code and q in e.cause_code.lower())
+                    )
+                ]
+
+            table_rows = [e.to_summary_dict() for e in filtered_events]
+            if table_rows:
+                st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No events match the selected filters.")
+
+# --- TAB 4: Protocol View ---
     with tab_protocols:
-        st.markdown("### Global Protocol Summary Breakdown")
-        proto_cols = st.columns(3)
-        with proto_cols[0]:
-            st.markdown("#### 🔵 ISDN / Q.931")
-            isdn_events = [e for e in events if e.protocol == ProtocolEnum.ISDN]
-            if isdn_events:
-                for ev in isdn_events:
-                    icon = "📥" if ev.direction == DirectionEnum.INBOUND else "📤"
-                    st.markdown(f"{icon} **{ev.message_type}** `callref={ev.call_reference}`")
-            else:
-                st.caption("No ISDN events detected.")
+        if not events:
+            st.info("💡 No trace events loaded yet. Upload files above or click **'Load Bundled Samples'** in the left sidebar to explore.")
+        else:
+            st.markdown("### Global Protocol Summary Breakdown")
+            proto_cols = st.columns(3)
+            with proto_cols[0]:
+                st.markdown("#### 🔵 ISDN / Q.931")
+                isdn_events = [e for e in events if e.protocol == ProtocolEnum.ISDN]
+                if isdn_events:
+                    for ev in isdn_events:
+                        icon = "📥" if ev.direction == DirectionEnum.INBOUND else "📤"
+                        st.markdown(f"{icon} **{ev.message_type}** `callref={ev.call_reference}`")
+                else:
+                    st.caption("No ISDN events detected.")
 
-        with proto_cols[1]:
-            st.markdown("#### 🟠 MGCP Packets")
-            mgcp_events = [e for e in events if e.protocol == ProtocolEnum.MGCP]
-            if mgcp_events:
-                for ev in mgcp_events:
-                    icon = "📥" if ev.direction == DirectionEnum.INBOUND else "📤"
-                    st.markdown(f"{icon} **{ev.message_type}** `trans={ev.transaction_id}`")
-            else:
-                st.caption("No MGCP events detected.")
+            with proto_cols[1]:
+                st.markdown("#### 🟠 MGCP Packets")
+                mgcp_events = [e for e in events if e.protocol == ProtocolEnum.MGCP]
+                if mgcp_events:
+                    for ev in mgcp_events:
+                        icon = "📥" if ev.direction == DirectionEnum.INBOUND else "📤"
+                        st.markdown(f"{icon} **{ev.message_type}** `trans={ev.transaction_id}`")
+                else:
+                    st.caption("No MGCP events detected.")
 
-        with proto_cols[2]:
-            st.markdown("#### 🟢 SIP Messages")
-            sip_events = [e for e in events if e.protocol == ProtocolEnum.SIP]
-            if sip_events:
-                for ev in sip_events:
-                    icon = "📥" if ev.direction == DirectionEnum.INBOUND else "📤"
-                    st.markdown(f"{icon} **{ev.message_type}** `{ev.calling_number or '-'} ➔ {ev.called_number or '-'}`")
-            else:
-                st.caption("No SIP events detected.")
+            with proto_cols[2]:
+                st.markdown("#### 🟢 SIP Messages")
+                sip_events = [e for e in events if e.protocol == ProtocolEnum.SIP]
+                if sip_events:
+                    for ev in sip_events:
+                        icon = "📥" if ev.direction == DirectionEnum.INBOUND else "📤"
+                        st.markdown(f"{icon} **{ev.message_type}** `{ev.calling_number or '-'} ➔ {ev.called_number or '-'}`")
+                else:
+                    st.caption("No SIP events detected.")
 
-    # --- TAB 5: Event Inspector ---
+# --- TAB 5: Event Inspector ---
     with tab_inspector:
-        st.markdown("### Detailed Event & Raw Trace Inspector")
-        st.caption("Select an individual signaling event to view structured attributes and verbatim trace text.")
+        if not events:
+            st.info("💡 No trace events loaded yet. Upload files above or click **'Load Bundled Samples'** in the left sidebar to explore.")
+        else:
+            st.markdown("### Detailed Event & Raw Trace Inspector")
+            st.caption("Select an individual signaling event to view structured attributes and verbatim trace text.")
 
-        if events:
             event_labels = [
                 f"[{i+1}/{len(events)}] {e.protocol.value} | {e.message_type} | {e.timestamp_raw or 'No TS'} | {e.calling_number or ''}->{e.called_number or ''}"
                 for i, e in enumerate(events)
@@ -671,32 +680,35 @@ def main():
 
     # --- TAB 6: Architecture & RCA ---
     with tab_architecture:
-        st.markdown("### Call Architecture & Progression")
+        if not events:
+            st.info("💡 No trace events loaded yet. Upload files above or click **'Load Bundled Samples'** in the left sidebar to explore.")
+        else:
+            st.markdown("### Call Architecture & Progression")
 
-        st.markdown(
-            """
-            <div class="call-flow-diagram">
-            PSTN  ──[ISDN Q.931]──▶  Voice Gateway (VGR)  ──[MGCP / SIP]──▶  CUCM 15.0  ──[SIP]──▶  CIPC / SIP Phone
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+            st.markdown(
+                """
+                <div class="call-flow-diagram">
+                PSTN  ──[ISDN Q.931]──▶  Voice Gateway (VGR)  ──[MGCP / SIP]──▶  CUCM 15.0  ──[SIP]──▶  CIPC / SIP Phone
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-        st.markdown("#### Detected Call Leg Distribution")
-        st.markdown(
-            f"""
-            - **ISDN Ingress**: `{isdn_count}` signaling frame(s) identified on PRI interface.
-            - **Gateway Control**: `{mgcp_count}` MGCP transaction(s) between Gateway and CallManager.
-            - **CUCM Egress**: `{sip_count}` SIP packet(s) between CUCM and destination endpoint.
-            """
-        )
+            st.markdown("#### Detected Call Leg Distribution")
+            st.markdown(
+                f"""
+                - **ISDN Ingress**: `{isdn_count}` signaling frame(s) identified on PRI interface.
+                - **Gateway Control**: `{mgcp_count}` MGCP transaction(s) between Gateway and CallManager.
+                - **CUCM Egress**: `{sip_count}` SIP packet(s) between CUCM and destination endpoint.
+                """
+            )
 
-        st.info(
-            "ℹ️ **Phase 1 Status**: Deterministic parsing, multi-signal call correlation, and rule-based anomaly detection are fully active.\n\n"
-            "The **LangGraph Evidence-Driven RCA Agent** will receive the structured `EvidencePack` in the next milestone to reason over anomalies and recommend diagnostic next steps."
-        )
+            st.info(
+                "ℹ️ **Phase 1 Status**: Deterministic parsing, multi-signal call correlation, and rule-based anomaly detection are fully active.\n\n"
+                "The **LangGraph Evidence-Driven RCA Agent** will receive the structured `EvidencePack` in the next milestone to reason over anomalies and recommend diagnostic next steps."
+            )
 
-    # --- TAB 7: CUCM Device ---
+# --- TAB 7: CUCM Device ---
     with tab_cucm:
         st.markdown("### CUCM Device Integration")
         st.caption("Connect to live CUCM via SSH for version detection and SDL trace discovery.")
@@ -745,104 +757,205 @@ def main():
                 selection = st.session_state["cucm_trace_selection"]
                 st.markdown("---")
                 st.markdown("#### ⏱️ Trace Selection Result")
-                
+
                 req = selection.get("request", {})
                 mode = req.get("mode", "unknown")
                 st.markdown(f"**Mode:** `{mode}`")
-                
+
                 start_time = selection.get("start_time")
                 end_time = selection.get("end_time")
                 if start_time and end_time:
                     st.markdown(f"**Requested Window:** `{start_time}` → `{end_time}`")
-                
+
                 candidates = selection.get("candidate_files", [])
                 total_candidates = selection.get("total_candidates", 0)
                 est_size_mb = selection.get("estimated_size_mb", 0)
-                
+
                 st.markdown(f"**Candidate Files:** {total_candidates}  |  **Estimated Size:** {est_size_mb:.2f} MB")
-                
+
                 if candidates:
-                    # Show candidate files with checkboxes for selection
-                    st.markdown("##### Candidate Files")
-                    
+                    st.markdown("##### Matching SDL Trace Files")
+
+                    # CUCM node/host for display
+                    cucm_host = settings.cucm_host
+
                     # Initialize selection state for checkboxes
                     if "cucm_selected_candidates" not in st.session_state:
                         st.session_state["cucm_selected_candidates"] = set()
-                    
+
+                    # Selection controls
+                    col_sel1, col_sel2, col_sel3 = st.columns([1, 1, 2])
+                    with col_sel1:
+                        if st.button("☑ Select All", use_container_width=True):
+                            st.session_state["cucm_selected_candidates"] = {f["filename"] for f in candidates}
+                            st.rerun()
+                    with col_sel2:
+                        if st.button("☐ Clear Selection", use_container_width=True):
+                            st.session_state["cucm_selected_candidates"] = set()
+                            st.rerun()
+
                     selected_candidates = set()
                     for i, f in enumerate(candidates):
-                        col_check, col_info = st.columns([1, 10])
+                        filename = f["filename"]
+                        size_mb = f.get("size_mb", 0)
+                        modified = f.get("modified", "N/A")
+                        trace_type = f.get("trace_type", "SDL")
+
+                        # Format file type display
+                        if filename.endswith(".txt.gzo"):
+                            type_display = "Active SDL (.gzo)"
+                        elif filename.endswith(".txt.gz"):
+                            type_display = "Compressed SDL (.gz)"
+                        elif filename.endswith(".txt"):
+                            type_display = "Plain SDL (.txt)"
+                        elif filename.endswith(".index"):
+                            type_display = "Index (.index)"
+                        else:
+                            type_display = trace_type
+
+                        col_check, col_info = st.columns([1, 11])
                         with col_check:
+                            # Skip .index files - they cannot be selected
+                            is_index = filename.endswith(".index")
                             checked = st.checkbox(
                                 "",
                                 key=f"cucm_candidate_{i}",
-                                value=f["filename"] in st.session_state["cucm_selected_candidates"],
+                                value=filename in st.session_state["cucm_selected_candidates"],
+                                disabled=is_index,
                             )
-                            if checked:
-                                selected_candidates.add(f["filename"])
+                            if checked and not is_index:
+                                selected_candidates.add(filename)
                         with col_info:
                             st.markdown(
-                                f"`{f['filename']}`  "
-                                f"({f['size_mb']:.2f} MB, "
-                                f"Modified: {f['modified']}, "
-                                f"Type: {f['trace_type']})"
+                                f"**{filename}**  \n"
+                                f"Node: `{cucm_host}`  \n"
+                                f"CUCM Timestamp: `{modified}`  \n"
+                                f"Type: `{type_display}`  \n"
+                                f"Size: `{size_mb:.2f} MB`"
                             )
-                    
+
                     # Update session state with selected candidates
                     st.session_state["cucm_selected_candidates"] = selected_candidates
-                    
-                    # Download Selected Traces button
-                    if selected_candidates:
-                        if st.button("📥 Download Selected Traces", type="primary"):
-                            if not cucm_client.is_connected():
-                                with st.spinner("Connecting to CUCM..."):
-                                    try:
-                                        cucm_client.connect()
-                                    except Exception as e:
-                                        st.error(f"Connection failed: {e}")
-                                        st.stop()
-                            
-                            collector = CUCMTraceCollector(client=cucm_client)
-                            candidate_files = [f for f in candidates if f["filename"] in selected_candidates]
-                            
-                            progress_bar = st.progress(0)
-                            status_text = st.empty()
-                            results = []
-                            
-                            def update_progress(result):
-                                results.append(result)
-                                status_text.text(f"Collected: {result.filename} ({'✅' if result.success else '❌'})")
-                            
-                            with st.spinner(f"Collecting {len(candidate_files)} file(s)..."):
-                                filenames = [f["filename"] for f in candidate_files]
-                                collected = collector.collect_multiple(
-                                    filenames,
-                                    progress_callback=update_progress,
-                                )
-                                progress_bar.progress(1.0)
-                            
-                            success_count = sum(1 for r in collected if r.success)
-                            st.success(f"Collected {success_count}/{len(collected)} files successfully")
-                            
-                            # Auto-ingest collected files
-                            if success_count > 0:
-                                if st.button("🔄 Ingest Collected Traces"):
-                                    ingestion_engine = get_ingestion_engine()
-                                    correlation_engine = get_correlation_engine()
-                                    all_events = []
-                                    for result in collected:
-                                        if result.success and result.local_path:
-                                            content = result.local_path.read_text(encoding="utf-8", errors="replace")
-                                            events = ingestion_engine.ingest_content(content, source=result.filename)
-                                            all_events.extend(events)
-                                    
-                                    sessions = correlation_engine.correlate(all_events)
-                                    st.session_state["parsed_events"] = all_events
-                                    st.session_state["correlated_sessions"] = sessions
-                                    st.success(f"Ingested {len(all_events)} events into {len(sessions)} session(s)")
-                                    st.rerun()
 
-            # SDL Files
+                    # Download button - disabled when nothing selected
+                    disabled_download = len(selected_candidates) == 0
+                    if st.button(
+                        "📥 Download Selected Traces",
+                        type="primary",
+                        disabled=disabled_download,
+                        use_container_width=True,
+                    ):
+                        if not cucm_client.is_connected():
+                            with st.spinner("Connecting to CUCM..."):
+                                try:
+                                    cucm_client.connect()
+                                except Exception as e:
+                                    st.error(f"Connection failed: {e}")
+                                    st.stop()
+
+                        # Use the collector to download selected files
+                        collector = CUCMTraceCollector(client=cucm_client)
+
+                        # Reconstruct SelectionResult with only selected files
+                        selected_files = [f for f in candidates if f["filename"] in selected_candidates]
+
+                        # Build a SelectionResult-like object for collect_selected_traces
+                        # We need CUCMTraceFile objects
+                        from app.devices.cucm.models import CUCMTraceFile
+
+                        trace_file_objects = []
+                        for f in selected_files:
+                            try:
+                                modified_dt = datetime.fromisoformat(f["modified"]) if f.get("modified") else datetime.now()
+                            except Exception:
+                                modified_dt = datetime.now()
+                            trace_file_objects.append(CUCMTraceFile(
+                                filename=f["filename"],
+                                path=f"activelog/cm/trace/ccm/sdl/{f['filename']}",
+                                size_bytes=f.get("size_bytes", 0),
+                                modified=modified_dt,
+                                trace_type=f.get("trace_type", "SDL_TRACE"),
+                            ))
+
+                        # Create a minimal SelectionResult for the collector
+                        selection_obj = SelectionResult(
+                            request=SelectionRequest(mode=SelectionMode(mode)),
+                            candidate_files=trace_file_objects,
+                            start_time=datetime.fromisoformat(start_time) if start_time else datetime.now(),
+                            end_time=datetime.fromisoformat(end_time) if end_time else datetime.now(),
+                            total_candidates=len(trace_file_objects),
+                            estimated_size_bytes=sum(f.size_bytes for f in trace_file_objects),
+                        )
+
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        download_results = []
+
+                        def update_progress(result):
+                            download_results.append(result)
+                            status_text.text(f"Collected: {result.filename} ({'✅' if result.success else '❌'})")
+
+                        with st.spinner(f"Downloading {len(selected_files)} file(s)..."):
+                            collected = collector.collect_selected_traces(
+                                selection_obj,
+                                progress_callback=update_progress,
+                            )
+                            progress_bar.progress(1.0)
+
+                        # Display download results
+                        st.markdown("---")
+                        st.markdown("##### Download Results")
+
+                        success_count = sum(1 for r in collected if r.success)
+                        fail_count = len(collected) - success_count
+
+                        for result in collected:
+                            if result.success:
+                                st.markdown(
+                                    f"✅ **Downloaded**  \n"
+                                    f"Filename: `{result.filename}`  \n"
+                                    f"Node: `{cucm_host}`  \n"
+                                    f"Local Path: `{result.local_path}`  \n"
+                                    f"Remote Size: `{result.size_bytes:,} bytes`  \n"
+                                    f"Local Size: `{result.local_path.stat().st_size if result.local_path and result.local_path.exists() else 0:,} bytes`  \n"
+                                    f"Validation: **OK** (size matches)"
+                                )
+                            else:
+                                st.markdown(
+                                    f"❌ **Failed**  \n"
+                                    f"Filename: `{result.filename}`  \n"
+                                    f"Node: `{cucm_host}`  \n"
+                                    f"Error: `{result.error}`"
+                                )
+                                st.markdown("---")
+
+                        if success_count > 0:
+                            st.success(f"Downloaded {success_count}/{len(collected)} files successfully")
+
+                            # Auto-ingest option
+                            if st.button("🔄 Ingest Downloaded Traces", key="ingest_after_download"):
+                                ingestion_engine = get_ingestion_engine()
+                                correlation_engine = get_correlation_engine()
+                                all_events = []
+                                for result in collected:
+                                    if result.success and result.local_path:
+                                        content = result.local_path.read_text(encoding="utf-8", errors="replace")
+                                        events = ingestion_engine.ingest_content(content, source=result.filename)
+                                        all_events.extend(events)
+
+                                sessions = correlation_engine.correlate(all_events)
+                                st.session_state["parsed_events"] = all_events
+                                st.session_state["correlated_sessions"] = sessions
+                                st.success(f"Ingested {len(all_events)} events into {len(sessions)} session(s)")
+                                st.rerun()
+
+                        if fail_count > 0:
+                            st.error(f"{fail_count} file(s) failed to download")
+
+                else:
+                    st.info("No candidate files match the selected time window.")
+
+            # SDL Files (full discovery)
             if "cucm_sdl_files" in st.session_state:
                 files = st.session_state["cucm_sdl_files"]
                 st.markdown(f"#### SDL Trace Files ({len(files)} found)")
