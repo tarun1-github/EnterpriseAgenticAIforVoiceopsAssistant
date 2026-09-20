@@ -73,6 +73,18 @@ class Settings(BaseSettings):
     gateway_password: Optional[SecretStr] = Field(default=None, description="Gateway SSH password")
     gateway_ssh_port: int = Field(default=22, description="Gateway SSH port")
 
+    # SFTP Server Configuration for CUCM file-get
+    # ----------------------------------------------------------------
+    # Ubuntu SFTP server for receiving CUCM trace files via `file get`
+    sftp_host: Optional[str] = Field(default=None, description="SFTP server IP or FQDN")
+    sftp_port: int = Field(default=22, description="SFTP server port")
+    sftp_username: Optional[str] = Field(default=None, description="SFTP username")
+    sftp_password: Optional[SecretStr] = Field(default=None, description="SFTP password")
+    sftp_remote_base_dir: str = Field(
+        default="/tmp/voiceops_mount/voiceops_sftp/cucm",
+        description="Base directory on SFTP server for CUCM file-get transfers",
+    )
+
     def is_provider_configured(self) -> bool:
         """Check if the currently selected LLM provider has necessary credentials."""
         if self.llm_provider == "openai":

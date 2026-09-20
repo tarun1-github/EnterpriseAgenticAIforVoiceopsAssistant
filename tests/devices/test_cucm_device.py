@@ -71,6 +71,18 @@ class MockTransport(CUCMTransport):
     def get_prompt(self) -> str:
         return self._prompt
 
+    def execute_file_get(
+        self,
+        filename: str,
+        sftp_host: str,
+        sftp_username: str,
+        sftp_password: str,
+        sftp_remote_dir: str,
+        remote_path: str = "activelog /cm/trace/ccm/sdl",
+    ) -> str:
+        """Mock execute_file_get for testing."""
+        return f"File get successful for {filename}"
+
 
 # --- Mock Transport with Large Files ---
 
@@ -601,138 +613,106 @@ class TestCUCMClient:
 # --- Collector Tests ---
 
 class TestCUCMTraceCollector:
-    def test_collect_via_view(self, cucm_client):
+    def test_collect_via_sftp_mock(self, cucm_client):
+        """Test SFTP collection with mocked transport."""
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
-        # file view only works for uncompressed files
-        result = collector.collect_file("SDL001_100.index", method="view")
-        assert result.success
-        assert result.method == "view"
-        assert result.local_path is not None
-        assert result.size_bytes > 0
 
-    def test_collect_multiple(self, cucm_client):
+        # Mock the SFTP config to avoid connection attempts
+        collector._config.sftp_host = "mock-sftp"
+        collector._config.sftp_username = "mock"
+        collector._config.sftp_password = "mock"
+        collector._config.sftp_remote_base_dir = "/tmp/mock"
+
+        # Since we don't have a real SFTP server, the collection will fail
+        # at the SFTP connection stage - this tests the config validation
+        result = collector.collect_file("SDL001_100_000079.txt.gzo")
+        # Expect failure due to mock SFTP
+        assert not result.success
+        assert result.method == "sftp_file_get"
+        assert "getaddrinfo" in result.error or "connection" in result.error.lower() or "refused" in result.error.lower()
+
+    def test_collect_multiple_sftp(self, cucm_client):
+        """Test multiple file collection via SFTP."""
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
-        # Only .index files work with view method
+        collector._config.sftp_host = "mock-sftp"
+        collector._config.sftp_username = "mock"
+        collector._config.sftp_password = "mock"
+        collector._config.sftp_remote_base_dir = "/tmp/mock"
+
         results = collector.collect_multiple([
-            "SDL001_100.index",
-            "SDL001_100_000001.txt.gz",  # This will fail with view
-        ], method="view")
+            "SDL001_100_000079.txt.gzo",
+            "SDL001_100_000001.txt.gz",
+        ])
         assert len(results) == 2
-        assert results[0].success  # .index works
-        assert not results[1].success  # .gz fails
+        # Both should fail due to mock SFTP
+        assert all(not r.success for r in results)
 
-    def test_collect_all_sdl(self, cucm_client):
+    def test_collect_all_sdl_sftp(self, cucm_client):
+        """Test collect all SDL via SFTP."""
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
-        # Only .index files work with view method (5 total, 1 .index)
-        results = collector.collect_all_sdl(max_files=2, method="view")
-        assert len(results) == 2
-        assert results[0].success  # .index
-        assert not results[1].success  # .gz
+        collector._config.sftp_host = "mock-sftp"
+        collector._config.sftp_username = "mock"
+        collector._config.sftp_password = "mock"
+        collector._config.sftp_remote_base_dir = "/tmp/mock"
+
+        results = collector.collect_all_sdl(max_files=2)
+        # Should return results for trace files only (first 2 trace files in mock)
+        assert len(results) >= 1
+        assert all(not r.success for r in results)
 
     def test_clear_local_storage(self, cucm_client):
         collector = CUCMTraceCollector(client=cucm_client)
         collector.clear_local_storage()
         assert collector.get_local_storage_path().exists()
 
-    def test_collect_via_get_returns_failure(self, cucm_client):
-        """Test that 'get' method returns clear failure (not implemented)."""
+    def test_collect_file_validates_filename(self, cucm_client):
+        """Test filename validation."""
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
-        result = collector.collect_file("SDL001_100_000001.txt.gz", method="get")
-        assert not result.success
-        assert result.method == "get"
-        assert "SFTP-based file get is not yet configured" in result.error
-        assert result.local_path is None
 
-    def test_auto_method_gz_file_returns_failure(self, cucm_client):
-        """Test auto method returns failure for .gz files (get not implemented)."""
-        cucm_client.connect()
-        collector = CUCMTraceCollector(client=cucm_client)
-        # .gz files should fail with auto (would need get)
-        result = collector.collect_file("SDL001_100_000001.txt.gz", method="auto")
-        assert not result.success
-        assert result.method == "get"
-        assert "SFTP-based file get is not yet configured" in result.error
-
-    def test_auto_method_gzo_file_uses_view(self, cucm_client):
-        """Test auto method uses view for .gzo files (plain text)."""
-        cucm_client.connect()
-        collector = CUCMTraceCollector(client=cucm_client)
-        # .gzo files are plain text and work with view
-        result = collector.collect_file("SDL001_100_000079.txt.gzo", method="auto")
-        assert result.success
-        assert result.method == "view"
-
-    def test_auto_method_index_file_uses_view(self, cucm_client):
-        """Test auto method uses view for .index files."""
-        cucm_client.connect()
-        collector = CUCMTraceCollector(client=cucm_client)
-        # .index files work with view
-        result = collector.collect_file("SDL001_100.index", method="auto")
-        assert result.success
-        assert result.method == "view"
-
-    def test_gzo_file_not_rejected_by_view(self, cucm_client):
-        """Test that .gzo files are NOT rejected by _collect_via_view."""
-        cucm_client.connect()
-        collector = CUCMTraceCollector(client=cucm_client)
-        # .gzo files should work with view (they are plain text)
-        result = collector.collect_file("SDL001_100_000079.txt.gzo", method="view")
-        assert result.success
-        assert result.method == "view"
-
-    def test_gz_file_still_rejected_by_view(self, cucm_client):
-        """Test that .gz files are still rejected by view."""
-        cucm_client.connect()
-        collector = CUCMTraceCollector(client=cucm_client)
-        # .gz files should fail with view
-        result = collector.collect_file("SDL001_100_000001.txt.gz", method="view")
-        assert not result.success
-        assert result.method == "view"
-        assert "compressed" in result.error.lower()
-
-    def test_filename_validation_rejects_path_traversal(self, cucm_client):
-        """Test that path traversal attempts are rejected."""
-        cucm_client.connect()
-        collector = CUCMTraceCollector(client=cucm_client)
-        result = collector.collect_file("../../etc/passwd", method="view")
+        # Path traversal
+        result = collector.collect_file("../../etc/passwd")
         assert not result.success
         assert result.method == "validation"
         assert "Path traversal" in result.error or "resolves outside" in result.error
 
-    def test_filename_validation_rejects_absolute_path(self, cucm_client):
-        """Test that absolute paths are rejected."""
-        cucm_client.connect()
-        collector = CUCMTraceCollector(client=cucm_client)
-        result = collector.collect_file("/etc/passwd", method="view")
+        # Absolute path
+        result = collector.collect_file("/etc/passwd")
         assert not result.success
         assert result.method == "validation"
         assert "Absolute paths" in result.error
 
-    def test_filename_validation_rejects_empty(self, cucm_client):
-        """Test that empty filenames are rejected."""
-        cucm_client.connect()
-        collector = CUCMTraceCollector(client=cucm_client)
-        result = collector.collect_file("", method="view")
+        # Empty filename
+        result = collector.collect_file("")
         assert not result.success
         assert result.method == "validation"
         assert "empty" in result.error.lower()
 
-    def test_custom_large_file_threshold(self, cucm_client):
-        """Test that large file threshold is configurable (but .gz still needs get)."""
-        cucm_client.connect()
-        # Even with large threshold, .gz files need get
-        config = CollectorConfig(large_file_threshold_mb=100)
-        collector = CUCMTraceCollector(client=cucm_client, config=config)
-        result = collector.collect_file("SDL001_100_000001.txt.gz", method="auto")
+        # .index file rejected
+        result = collector.collect_file("SDL001_100.index")
         assert not result.success
-        assert result.method == "get"
+        assert "index" in result.error.lower()
+
+    def test_collect_file_requires_sftp_config(self, cucm_client):
+        """Test that collection requires SFTP configuration."""
+        cucm_client.connect()
+        collector = CUCMTraceCollector(client=cucm_client)
+        # Don't set SFTP config - should fail at config validation
+        collector._config.sftp_host = None
+
+        result = collector.collect_file("SDL001_100_000079.txt.gzo")
+        assert not result.success
+        assert result.method == "config"
+        assert "SFTP" in result.error
 
 
 # --- Collector Selection Tests ---
+
+class TestCUCMCollectorSelection:
+    """Tests for collect_selected_traces and selection-based collection."""
 
 class TestCUCMCollectorSelection:
     """Tests for collect_selected_traces and selection-based collection."""
@@ -741,6 +721,12 @@ class TestCUCMCollectorSelection:
         """collect_selected_traces should download only candidate files from SelectionResult."""
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
+
+        # Set mock SFTP config
+        collector._config.sftp_host = "mock-sftp"
+        collector._config.sftp_username = "mock"
+        collector._config.sftp_password = "mock"
+        collector._config.sftp_remote_base_dir = "/tmp/mock"
 
         # Create a SelectionResult with specific files
         from app.devices.cucm.selection import SelectionResult, SelectionRequest, SelectionMode
@@ -778,15 +764,9 @@ class TestCUCMCollectorSelection:
         results = collector.collect_selected_traces(selection)
 
         assert len(results) == 2
-        # .gzo should succeed (view), .gz should fail (get not implemented)
-        gzo_result = next(r for r in results if r.filename.endswith(".gzo"))
-        gz_result = next(r for r in results if r.filename.endswith(".gz") and not r.filename.endswith(".gzo"))
-
-        assert gzo_result.success is True
-        assert gzo_result.method == "view"
-        assert gz_result.success is False
-        assert gz_result.method == "get"
-        assert "SFTP-based file get is not yet configured" in gz_result.error
+        # Both should fail due to mock SFTP
+        assert all(not r.success for r in results)
+        assert all(r.method == "sftp_file_get" for r in results)
 
     def test_collect_selected_traces_empty_selection(self, cucm_client):
         """collect_selected_traces with empty candidate list should return empty list."""
@@ -812,6 +792,10 @@ class TestCUCMCollectorSelection:
         """collect_selected_traces should not include .index files even if in selection."""
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
+        collector._config.sftp_host = "mock-sftp"
+        collector._config.sftp_username = "mock"
+        collector._config.sftp_password = "mock"
+        collector._config.sftp_remote_base_dir = "/tmp/mock"
 
         from app.devices.cucm.selection import SelectionResult, SelectionRequest, SelectionMode
         from app.devices.cucm.models import CUCMTraceFile
@@ -837,51 +821,38 @@ class TestCUCMCollectorSelection:
         )
 
         results = collector.collect_selected_traces(selection)
-        # .index files can be collected via view but are typically not selected
-        # The selection service already filters them out, but verify behavior
-        assert len(results) == 1
-        assert results[0].filename == "SDL001_100.index"
-        assert results[0].success is True  # .index files work with view
+        # .index files should be filtered out (collect_selected_traces only processes SDL_TRACE)
+        assert len(results) == 0
 
-    def test_gzo_file_downloaded_as_plain_text(self, cucm_client):
-        """.gzo files should be downloaded as plain text without gzip extraction."""
+    def test_gzo_file_sftp_workflow(self, cucm_client):
+        """.gzo files use SFTP workflow."""
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
+        collector._config.sftp_host = "mock-sftp"
+        collector._config.sftp_username = "mock"
+        collector._config.sftp_password = "mock"
+        collector._config.sftp_remote_base_dir = "/tmp/mock"
 
-        # Collect a .gzo file directly
-        result = collector.collect_file("SDL001_100_000079.txt.gzo", method="view")
+        result = collector.collect_file("SDL001_100_000079.txt.gzo")
 
-        assert result.success is True
-        assert result.method == "view"
-        assert result.local_path is not None
-        assert result.local_path.exists()
-        # Content should be readable as text (not gzipped)
-        content = result.local_path.read_text(encoding="utf-8", errors="replace")
-        assert len(content) > 0
-        # Should not be gzip compressed (no gzip magic bytes)
-        assert not content.startswith("\x1f\x8b")
+        # Should fail due to mock SFTP but method should be sftp_file_get
+        assert result.method == "sftp_file_get"
+        assert not result.success
 
-    def test_gz_file_not_downloaded_via_view(self, cucm_client):
-        """.gz files should fail when using view method (require get/SFTP)."""
+    def test_gz_file_sftp_workflow(self, cucm_client):
+        """.gz files use SFTP workflow."""
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
+        collector._config.sftp_host = "mock-sftp"
+        collector._config.sftp_username = "mock"
+        collector._config.sftp_password = "mock"
+        collector._config.sftp_remote_base_dir = "/tmp/mock"
 
-        result = collector.collect_file("SDL001_100_000001.txt.gz", method="view")
+        result = collector.collect_file("SDL001_100_000001.txt.gz")
 
-        assert result.success is False
-        assert result.method == "view"
-        assert "compressed" in result.error.lower()
-
-    def test_gz_file_requires_get_method(self, cucm_client):
-        """.gz files should fail with get method (not yet implemented)."""
-        cucm_client.connect()
-        collector = CUCMTraceCollector(client=cucm_client)
-
-        result = collector.collect_file("SDL001_100_000001.txt.gz", method="get")
-
-        assert result.success is False
-        assert result.method == "get"
-        assert "SFTP-based file get is not yet configured" in result.error
+        # Should fail due to mock SFTP but method should be sftp_file_get
+        assert result.method == "sftp_file_get"
+        assert not result.success
 
     def test_index_file_cannot_be_selected_in_ui(self, mock_transport):
         """Test that .index files are marked as non-selectable in candidate data."""
@@ -907,25 +878,34 @@ class TestCUCMCollectorSelection:
         """Test that CollectionResult has all required fields for UI display."""
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
+        collector._config.sftp_host = "mock-sftp"
+        collector._config.sftp_username = "mock"
+        collector._config.sftp_password = "mock"
+        collector._config.sftp_remote_base_dir = "/tmp/mock"
 
-        result = collector.collect_file("SDL001_100_000079.txt.gzo", method="view")
+        result = collector.collect_file("SDL001_100_000079.txt.gzo")
 
-        assert result.success is True
+        # Result should have all new fields
         assert result.filename == "SDL001_100_000079.txt.gzo"
-        assert result.local_path is not None
-        assert result.size_bytes > 0
-        assert result.method == "view"
-        assert result.error is None
-
-        # Verify local file exists and size matches
-        assert result.local_path.exists()
-        local_size = result.local_path.stat().st_size
-        assert local_size == result.size_bytes
+        assert result.method == "sftp_file_get"
+        assert hasattr(result, 'raw_path')
+        assert hasattr(result, 'extracted_path')
+        assert hasattr(result, 'remote_size_bytes')
+        assert hasattr(result, 'raw_size_bytes')
+        assert hasattr(result, 'extracted_size_bytes')
+        assert hasattr(result, 'raw_sha256')
+        assert hasattr(result, 'extracted_sha256')
+        assert hasattr(result, 'transfer_success')
+        assert hasattr(result, 'extraction_success')
 
     def test_collect_multiple_preserves_order(self, cucm_client):
         """collect_multiple should return results in same order as input filenames."""
         cucm_client.connect()
         collector = CUCMTraceCollector(client=cucm_client)
+        collector._config.sftp_host = "mock-sftp"
+        collector._config.sftp_username = "mock"
+        collector._config.sftp_password = "mock"
+        collector._config.sftp_remote_base_dir = "/tmp/mock"
 
         filenames = [
             "SDL001_100_000079.txt.gzo",
@@ -933,16 +913,14 @@ class TestCUCMCollectorSelection:
             "SDL001_100.index",
         ]
 
-        results = collector.collect_multiple(filenames, method="auto")
+        results = collector.collect_multiple(filenames)
 
         assert len(results) == 3
         assert results[0].filename == "SDL001_100_000079.txt.gzo"
         assert results[1].filename == "SDL001_100_000001.txt.gz"
         assert results[2].filename == "SDL001_100.index"
-        # First should succeed (.gzo via view), second fail (.gz needs get), third succeed (.index via view)
-        assert results[0].success is True
-        assert results[1].success is False
-        assert results[2].success is True
+        # .index should fail (rejected), .gzo and .gz fail due to mock SFTP
+        assert results[2].success is False  # .index rejected
 
 
 # --- Exception Tests ---
@@ -1090,7 +1068,18 @@ class TestCUCMConnectionFlow:
             
             def get_prompt(self) -> str:
                 return ""
-        
+
+            def execute_file_get(
+                self,
+                filename: str,
+                sftp_host: str,
+                sftp_username: str,
+                sftp_password: str,
+                sftp_remote_dir: str,
+                remote_path: str = "activelog /cm/trace/ccm/sdl",
+            ) -> str:
+                return ""
+
         transport = AuthFailTransport(config)
         with pytest.raises(CUCMAuthenticationError) as exc_info:
             transport.connect()

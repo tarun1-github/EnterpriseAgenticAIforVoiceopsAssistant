@@ -914,10 +914,15 @@ def main():
                                     f"✅ **Downloaded**  \n"
                                     f"Filename: `{result.filename}`  \n"
                                     f"Node: `{cucm_host}`  \n"
-                                    f"Local Path: `{result.local_path}`  \n"
-                                    f"Remote Size: `{result.size_bytes:,} bytes`  \n"
-                                    f"Local Size: `{result.local_path.stat().st_size if result.local_path and result.local_path.exists() else 0:,} bytes`  \n"
-                                    f"Validation: **OK** (size matches)"
+                                    f"Raw Artifact: `{result.raw_path}`  \n"
+                                    f"Raw Size: `{result.raw_size_bytes:,} bytes`  \n"
+                                    f"Extracted Evidence: `{result.extracted_path}`  \n"
+                                    f"Extracted Size: `{result.extracted_size_bytes:,} bytes`  \n"
+                                    f"Transfer Method: `{result.method}`  \n"
+                                    f"Remote Size: `{result.remote_size_bytes:,} bytes`  \n"
+                                    f"Raw SHA-256: `{result.raw_sha256[:16] if result.raw_sha256 else 'N/A'}...`  \n"
+                                    f"Extracted SHA-256: `{result.extracted_sha256[:16] if result.extracted_sha256 else 'N/A'}...`  \n"
+                                    f"Validation: **OK** (transfer={result.transfer_success}, extraction={result.extraction_success})"
                                 )
                             else:
                                 st.markdown(
@@ -1005,7 +1010,35 @@ def main():
                             success_count = sum(1 for r in collected if r.success)
                             st.success(f"Collected {success_count}/{len(collected)} files successfully")
 
-                            # Auto-ingest collected files
+                            # Display enhanced results
+                            st.markdown("---")
+                            st.markdown("##### Collection Results")
+                            for result in collected:
+                                if result.success:
+                                    st.markdown(
+                                        f"✅ **Collected**  \n"
+                                        f"Filename: `{result.filename}`  \n"
+                                        f"Node: `{cucm_host}`  \n"
+                                        f"Raw Artifact: `{result.raw_path}`  \n"
+                                        f"Raw Size: `{result.raw_size_bytes:,} bytes`  \n"
+                                        f"Extracted Evidence: `{result.extracted_path}`  \n"
+                                        f"Extracted Size: `{result.extracted_size_bytes:,} bytes`  \n"
+                                        f"Transfer Method: `{result.method}`  \n"
+                                        f"Remote Size: `{result.remote_size_bytes:,} bytes`  \n"
+                                        f"Raw SHA-256: `{result.raw_sha256[:16] if result.raw_sha256 else 'N/A'}...`  \n"
+                                        f"Extracted SHA-256: `{result.extracted_sha256[:16] if result.extracted_sha256 else 'N/A'}...`  \n"
+                                        f"Validation: **OK** (transfer={result.transfer_success}, extraction={result.extraction_success})"
+                                    )
+                                else:
+                                    st.markdown(
+                                        f"❌ **Failed**  \n"
+                                        f"Filename: `{result.filename}`  \n"
+                                        f"Node: `{cucm_host}`  \n"
+                                        f"Error: `{result.error}`"
+                                    )
+                                    st.markdown("---")
+
+                            # Auto-ingest collected files (use extracted .txt)
                             if success_count > 0:
                                 if st.button("🔄 Ingest Collected Traces"):
                                     ingestion_engine = get_ingestion_engine()

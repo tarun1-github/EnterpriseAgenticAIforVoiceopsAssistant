@@ -173,6 +173,45 @@ class CUCMClient:
             raise CUCMConnectionError("Not connected to CUCM")
         return self._transport.send_command(command)
 
+    def execute_file_get(
+        self,
+        filename: str,
+        sftp_host: str,
+        sftp_username: str,
+        sftp_password: str,
+        sftp_remote_dir: str,
+        remote_path: str = "activelog /cm/trace/ccm/sdl",
+    ) -> str:
+        """Execute CUCM 'file get' to transfer SDL file via SFTP.
+
+        Args:
+            filename: Name of the SDL file to transfer.
+            sftp_host: SFTP server hostname/IP.
+            sftp_username: SFTP username.
+            sftp_password: SFTP password.
+            sftp_remote_dir: Remote directory on SFTP server.
+            remote_path: CUCM source directory.
+
+        Returns:
+            Command output from CUCM.
+
+        Raises:
+            CUCMConnectionError: If not connected.
+            CUCMCommandError: If command fails.
+        """
+        if not self.is_connected():
+            raise CUCMConnectionError("Not connected to CUCM")
+
+        logger.info("Executing CUCM file-get: filename=%s sftp_host=%s", filename, sftp_host)
+        return self._transport.execute_file_get(
+            filename=filename,
+            sftp_host=sftp_host,
+            sftp_username=sftp_username,
+            sftp_password=sftp_password,
+            sftp_remote_dir=sftp_remote_dir,
+            remote_path=remote_path,
+        )
+
     def run_diagnostic(self) -> dict:
         """Run connection and capability diagnostic.
 

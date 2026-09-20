@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 from dataclasses import dataclass
 import time
+import re
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -76,6 +77,19 @@ class CUCMTransport(ABC):
     @abstractmethod
     def get_prompt(self) -> str:
         """Get the detected CUCM CLI prompt."""
+        pass
+
+    @abstractmethod
+    def execute_file_get(
+        self,
+        filename: str,
+        sftp_host: str,
+        sftp_username: str,
+        sftp_password: str,
+        sftp_remote_dir: str,
+        remote_path: str = "activelog /cm/trace/ccm/sdl",
+    ) -> str:
+        """Execute interactive CUCM 'file get' command for SFTP transfer."""
         pass
 
 
@@ -343,6 +357,157 @@ class NetmikoTransport(CUCMTransport):
     def get_prompt(self) -> str:
         """Get the current CUCM CLI prompt."""
         return self._base_prompt
+
+    def execute_file_get(
+        self,
+        filename: str,
+        sftp_host: str,
+        sftp_username: str,
+        sftp_password: str,
+        sftp_remote_dir: str,
+        remote_path: str = "activelog /cm/trace/ccm/sdl",
+    ) -> str:
+        """Execute interactive CUCM 'file get' command for SFTP transfer.
+
+        This method handles the interactive prompts from CUCM:
+        1. SFTP host prompt
+        2. SFTP username prompt
+        3. SFTP password prompt
+        4. Destination directory prompt
+        5. Confirmation prompt (if any)
+
+        Args:
+            filename: Name of the SDL file to transfer.
+            sftp_host: SFTP server hostname/IP.
+            sftp_username: SFTP username.
+            sftp_password: SFTP password (never logged).
+            sftp_remote_dir: Remote directory on SFTP server.
+            remote_path: CUCM source directory.
+
+        Returns:
+            Command output from CUCM.
+
+        Raises:
+            CUCMCommandError: If command fails or transfer fails.
+            CUCMTimeoutError: If transfer times out.
+        """
+        if not self.is_connected():
+            raise CUCMConnectionError("Not connected to CUCM")
+
+        full_remote_path = f"{remote_path}/{filename}"
+        command = f"file get {full_remote_path}"
+
+        logger.info("Starting CUCM file-get: filename=%s sftp_host=%s", filename, sftp_host)
+
+        # Use send_command_timing for interactive command with manual prompt handling
+        # We'll send the command and then respond to each prompt sequentially
+        try:
+            # Send the initial command
+            output = self._connection.send_command_timing(
+                command,
+                delay_factor=2.0,
+                strip_prompt=False,
+                strip_command=False,
+            )
+            logger.debug("Initial file-get output: %r", output)
+
+            # Handle SFTP host prompt
+            output += self._send_and_wait(sftp_host + "\n", "username", "SFTP host")
+
+            # Handle SFTP username prompt
+            output += self._send_and_wait(sftp_username + "\n", "password", "SFTP username")
+
+            # Handle SFTP password prompt (never log password)
+            output += self._send_and_wait(sftp_password + "\n", "directory", "SFTP password")
+
+            # Handle destination directory prompt
+            output += self._send_and_wait(sftp_remote_dir + "\n", "proceed", "SFTP directory")
+
+            # Handle confirmation/proceed prompt if present
+            if "proceed" in output.lower() or "confirm" in output.lower() or "continue" in output.lower():
+                output += self._send_and_wait("y\n", "admin:", "confirmation")
+
+            # Wait for transfer completion - look for admin: prompt return
+            output += self._wait_for_prompt(timeout=300)
+
+            logger.info("CUCM file-get completed: filename=%s", filename)
+            return output
+
+        except Exception as e:
+            logger.error("CUCM file-get failed: filename=%s error=%s", filename, e)
+            raise CUCMCommandError(
+                f"CUCM file-get failed: {e}",
+                command=command,
+            ) from e
+
+    def _send_and_wait(self, text: str, expect_pattern: str, description: str, timeout: int = 30) -> str:
+        """Send text and wait for expected pattern in output.
+
+        Args:
+            text: Text to send (e.g., username, password, directory).
+            expect_pattern: Pattern to wait for in output.
+            description: Description for logging (never includes sensitive data).
+            timeout: Timeout in seconds.
+
+        Returns:
+            Accumulated output.
+        """
+        if not self._connection or not self._connection.remote_conn:
+            raise CUCMConnectionError("No active SSH channel")
+
+        channel = self._connection.remote_conn
+        channel.send(text)
+
+        output = ""
+        start_time = time.time()
+        pattern_re = re.compile(expect_pattern, re.IGNORECASE)
+
+        while time.time() - start_time < timeout:
+            if channel.recv_ready():
+                chunk = channel.recv(4096).decode("utf-8", errors="ignore")
+                output += chunk
+                logger.debug("%s response chunk: %r", description, chunk)
+
+                if pattern_re.search(output):
+                    logger.debug("%s prompt detected", description)
+                    return output
+            else:
+                time.sleep(0.2)
+
+        logger.warning("%s prompt not detected within %ds, output so far: %r", description, timeout, output)
+        return output
+
+    def _wait_for_prompt(self, timeout: int = 300) -> str:
+        """Wait for the admin: prompt to return, indicating command completion.
+
+        Args:
+            timeout: Maximum time to wait in seconds.
+
+        Returns:
+            Output accumulated while waiting.
+        """
+        if not self._connection or not self._connection.remote_conn:
+            raise CUCMConnectionError("No active SSH channel")
+
+        channel = self._connection.remote_conn
+        output = ""
+        start_time = time.time()
+        prompt_re = re.compile(r"admin:\s*$")
+
+        while time.time() - start_time < timeout:
+            if channel.recv_ready():
+                chunk = channel.recv(4096).decode("utf-8", errors="ignore")
+                output += chunk
+                logger.debug("Transfer wait chunk: %r", chunk)
+
+                if prompt_re.search(output):
+                    logger.debug("admin: prompt detected - transfer complete")
+                    return output
+            else:
+                time.sleep(0.5)
+
+        logger.warning("admin: prompt not detected within %ds", timeout)
+        return output
 
 
 def create_transport(config: Optional[TransportConfig] = None) -> CUCMTransport:
