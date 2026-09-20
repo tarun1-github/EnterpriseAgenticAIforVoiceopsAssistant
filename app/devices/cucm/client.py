@@ -90,20 +90,32 @@ class CUCMClient:
         command = f"file list {normalized_path} detail"
         output = self._transport.send_command(command)
 
-        # DIAGNOSTIC: Log exact raw output
-        logger.info("SDL command: %r", command)
-        logger.info("SDL raw output: %r", output)
-        logger.info("SDL output lines: %d", len(output.splitlines()))
+        # Log command and summary (not full output)
+        logger.info("SDL command: %s", command)
+        raw_lines = output.splitlines()
+        logger.info("SDL discovery returned %d entries", len(raw_lines))
 
         files = []
-        for i, line in enumerate(output.splitlines()):
+        for i, line in enumerate(raw_lines):
             trace_file = CUCMTraceFile.from_file_list_output(line, path)
             if trace_file:
                 files.append(trace_file)
             else:
                 logger.warning("SDL line %d failed to parse: %r", i, line)
 
-        logger.info("Found %d SDL trace files", len(files))
+        # Log summary by type
+        trace_count = sum(1 for f in files if f.trace_type == "SDL_TRACE")
+        index_count = sum(1 for f in files if f.trace_type == "SDL_INDEX")
+        logger.info("SDL discovery parsed: %d trace files, %d metadata/index files", trace_count, index_count)
+
+        # Optional DEBUG sample of first/last filenames
+        if files:
+            logger.debug(
+                "SDL discovery sample: first=%s, last=%s",
+                files[0].filename,
+                files[-1].filename,
+            )
+
         return files
 
     def get_sdl_file_content(self, filename: str, path: str = "activelog/cm/trace/ccm/sdl") -> str:
