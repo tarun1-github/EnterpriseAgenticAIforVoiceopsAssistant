@@ -758,8 +758,7 @@ def main():
                 st.markdown("---")
                 st.markdown("#### ⏱️ Trace Selection Result")
 
-                req = selection.get("request", {})
-                mode = req.get("mode", "unknown")
+                mode = selection.get("mode", "unknown")
                 st.markdown(f"**Mode:** `{mode}`")
 
                 start_time = selection.get("start_time")
