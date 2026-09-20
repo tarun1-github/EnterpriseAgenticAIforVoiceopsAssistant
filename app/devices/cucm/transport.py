@@ -295,12 +295,17 @@ class NetmikoTransport(CUCMTransport):
         if expect_string is None:
             expect_string = self._base_prompt
 
+        # Use longer timeout for file view commands which can have large output
+        read_timeout = self.config.command_timeout
+        if command.startswith("file view "):
+            read_timeout = max(read_timeout, 300)  # 5 minutes for file view
+
         try:
-            logger.debug("Sending command: %s", command)
+            logger.debug("Sending command: %s (expect: %s, timeout: %ds)", command, expect_string, read_timeout)
             output = self._connection.send_command(
                 command,
                 expect_string=expect_string,
-                read_timeout=self.config.command_timeout,
+                read_timeout=read_timeout,
                 strip_prompt=True,
                 strip_command=True,
             )
