@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     cucm_ssh_port: int = Field(default=22, description="CUCM SSH port")
     cucm_ssh_timeout: int = Field(default=30, description="SSH connection timeout (seconds)")
     cucm_command_timeout: int = Field(default=60, description="CLI command execution timeout (seconds)")
-    cucm_prompt_timeout: int = Field(default=15, description="Prompt detection timeout (seconds)")
+    cucm_prompt_timeout: int = Field(default=30, description="Prompt detection timeout (seconds)")
 
     # CUCM Platform Administrator Credentials
     # Reserved for future platform-level operations
@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     sftp_remote_base_dir: str = Field(
         default="/tmp/voiceops_mount/voiceops_sftp/cucm",
         description="Base directory on SFTP server for CUCM file-get transfers",
+    )
+
+    # VoiceOps Persistent Trace Storage
+    voiceops_trace_storage: str = Field(
+        default="data/voiceops_traces",
+        description="Persistent trace storage directory for raw, extracted traces and manifests",
     )
 
     def is_provider_configured(self) -> bool:

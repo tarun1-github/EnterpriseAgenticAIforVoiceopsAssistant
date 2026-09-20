@@ -81,6 +81,10 @@ class MockTransport(CUCMTransport):
         import re
         buffer_lower = buffer.lower()
 
+        # Check for PROCEED_CONFIRM - exact live CUCM prompt (must check FIRST)
+        if re.search(r"would\s+you\s+like\s+to\s+proceed\s*\[y/n\]", buffer_lower):
+            return "proceed_confirm"
+
         # Check for host-key confirmation (yes/no) prompt - must check BEFORE host prompt
         # Pattern: "Please answer 'y' for <yes> or 'n' for no:" or similar variations
         if re.search(r"please\s+answer.*[yn].*(yes|no)", buffer_lower) or \
@@ -90,15 +94,21 @@ class MockTransport(CUCMTransport):
            (re.search(r"are you sure", buffer_lower) and re.search(r"(yes|no)", buffer_lower)):
             return "confirm"
 
-        # Check for SFTP host prompt - various forms
-        if re.search(r"(sftp|ssh).*host", buffer_lower) or \
+        # Check for SFTP port prompt
+        if re.search(r"(?:sftp\s*(?:server\s*)?)?port\s*(?:\[[^\]]*\])?\s*:", buffer_lower):
+            return "port"
+
+        # Check for SFTP host prompt - various forms including "SFTP server IP:"
+        if re.search(r"(?:sftp|ssh).*host", buffer_lower) or \
            re.search(r"remote.*host", buffer_lower) or \
            re.search(r"destination.*host", buffer_lower) or \
-           re.search(r"server.*name", buffer_lower):
+           re.search(r"server.*name", buffer_lower) or \
+           re.search(r"sftp\s*(?:server\s*)?(?:ip|host)", buffer_lower):
             return "host"
 
-        # Check for username prompt
+        # Check for username prompt (including "User ID:", "Username:", "User name:", "Login name:", but not "User:")
         if re.search(r"(user|login).*name", buffer_lower) or \
+           re.search(r"user\s*id", buffer_lower) or \
            re.search(r"username", buffer_lower):
             return "username"
 
@@ -106,8 +116,8 @@ class MockTransport(CUCMTransport):
         if re.search(r"password", buffer_lower) and not re.search(r"password.*again", buffer_lower):
             return "password"
 
-        # Check for directory prompt
-        if re.search(r"(destination|remote).*dir", buffer_lower) or \
+        # Check for directory prompt (including "Download directory:")
+        if re.search(r"(destination|remote|download).*dir", buffer_lower) or \
            re.search(r"directory", buffer_lower) or \
            re.search(r"path", buffer_lower):
             return "directory"
@@ -126,6 +136,7 @@ class MockTransport(CUCMTransport):
         sftp_password: str,
         sftp_remote_dir: str,
         remote_path: str = "activelog /cm/trace/ccm/sdl",
+        sftp_port: int = 22,
     ) -> str:
         """Mock execute_file_get simulating the interactive state machine."""
         full_remote_path = f"{remote_path}/{filename}"
@@ -210,6 +221,7 @@ class MockTransportStateMachine(MockTransport):
         sftp_password: str,
         sftp_remote_dir: str,
         remote_path: str = "activelog /cm/trace/ccm/sdl",
+        sftp_port: int = 22,
     ) -> str:
         """Execute file-get with scenario-based simulation."""
         
@@ -707,6 +719,14 @@ def mock_transport_single_buffer_file_gather(transport_config):
 def mock_transport_proceed_confirm(transport_config):
     """Mock transport with proceed confirmation after file-gather (exact live CUCM 15 output)."""
     return MockTransportStateMachine(transport_config, file_get_scenario="proceed_confirm")
+
+
+@pytest.fixture(autouse=True)
+def setup_isolated_storage(tmp_path, monkeypatch):
+    """Isolate trace storage to a temporary directory so tests never touch production data."""
+    from app.core import config
+    settings = config.get_settings()
+    monkeypatch.setattr(settings, "voiceops_trace_storage", str(tmp_path / "voiceops_traces"))
 
 
 # --- Transport Tests ---
@@ -1371,6 +1391,481 @@ class TestDetectPrompt:
         assert transport._detect_prompt("Transfer in progress...") is None
         assert transport._detect_prompt("admin:show") is None  # command echo, not prompt
 
+    def test_detect_proceed_confirm_prompt(self, transport_config):
+        """Test detection of proceed confirmation prompt (distinct from initial and host-key confirm)."""
+        transport = MockTransport(transport_config)
+        transport.connect()
+
+        assert transport._detect_prompt("Would you like to proceed [y/n]?") == "proceed_confirm"
+        assert transport._detect_prompt("would you like to proceed [y/n]? ") == "proceed_confirm"
+
+
+# --- Stream State Machine Regression Tests (verifying NetmikoTransport and write counts) ---
+
+class MockStreamChannel:
+    """Mock interactive SSH channel simulating paramiko channel for state machine testing."""
+
+    def __init__(self, responses=None):
+        self.sent_writes = []
+        self._incoming = ""
+        self._responder = responses
+
+    def queue_data(self, data: str):
+        self._incoming += data
+
+    def send(self, data: str):
+        self.sent_writes.append(data)
+        if callable(self._responder):
+            resp = self._responder(data, self.sent_writes)
+            if resp:
+                self._incoming += resp
+        elif isinstance(self._responder, dict):
+            for k, v in self._responder.items():
+                if k in data:
+                    self._incoming += v
+                    break
+
+    def recv_ready(self) -> bool:
+        return len(self._incoming) > 0
+
+    def recv(self, n: int) -> bytes:
+        chunk = self._incoming[:n]
+        self._incoming = self._incoming[n:]
+        return chunk.encode("utf-8")
+
+
+def _create_stream_transport(transport_config, channel):
+    """Helper to bind a MockStreamChannel to a real NetmikoTransport instance."""
+    from unittest.mock import MagicMock
+    transport = NetmikoTransport(transport_config)
+    transport._connected = True
+    mock_conn = MagicMock()
+    mock_conn.remote_conn = channel
+    transport._connection = mock_conn
+    return transport
+
+
+class TestCUCMFileGetStateMachineStream:
+    """Regression test suite for CUCM 15 interactive file-get state machine.
+
+    Verifies stream / cursor semantics, exact write counts, and single-buffer handling
+    directly on NetmikoTransport.execute_file_get.
+    """
+
+    def test_initial_confirmation_path(self, transport_config):
+        """1. Initial confirmation path: verify prompt is answered with 'y\\n' and transitions to gather."""
+        def responder(data, writes):
+            if "file get" in data:
+                return "Please answer 'y' for <yes> or 'n' for <no>: "
+            elif data == "y\n" and len(writes) == 2:
+                return ("Please wait while the system is gathering files info ...\n"
+                        "Get file: active/cm/trace/ccm/sdl/SDL001_100_000086.txt.gzo\n"
+                        "done.\n"
+                        "Would you like to proceed [y/n]? ")
+            elif data == "y\n" and len(writes) == 3:
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                return "User: "
+            elif "sftpuser" in data:
+                return "Password: "
+            elif "sftppass" in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer complete.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        output = transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        assert "admin:" in output
+        assert channel.sent_writes[0].startswith("file get ")
+        assert channel.sent_writes[1] == "y\n"  # initial confirm write
+        assert channel.sent_writes[2] == "y\n"  # proceed confirm write
+        assert channel.sent_writes[3] == "10.10.10.10\n"
+        assert channel.sent_writes.count("y\n") == 2
+
+    def test_no_initial_confirmation_path(self, transport_config):
+        """2. No initial confirmation path: CUCM goes straight to file gather without asking overwrite."""
+        def responder(data, writes):
+            if "file get" in data:
+                return ("Please wait while the system is gathering files info ...\n"
+                        "Get file: active/cm/trace/ccm/sdl/SDL001_100_000086.txt.gzo\n"
+                        "done.\n"
+                        "Would you like to proceed [y/n]? ")
+            elif data == "y\n":
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                return "User: "
+            elif "sftpuser" in data:
+                return "Password: "
+            elif "sftppass" in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer complete.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        output = transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        assert "admin:" in output
+        assert channel.sent_writes[0].startswith("file get ")
+        assert channel.sent_writes[1] == "y\n"  # proceed confirm
+        assert channel.sent_writes[2] == "10.10.10.10\n"
+        assert channel.sent_writes.count("y\n") == 1
+
+    def test_single_buffer_file_gather(self, transport_config):
+        """3. Single-buffer file gather: FILE_GATHER_STARTED -> FILE_GATHER_COMPLETE in one read."""
+        def responder(data, writes):
+            if "file get" in data:
+                return ("Please wait while the system is gathering files info ...\n"
+                        "Get file: active/cm/trace/ccm/sdl/SDL001_100_000086.txt.gzo\n"
+                        "done.\n"
+                        "Would you like to proceed [y/n]? ")
+            elif data == "y\n":
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                return "User: "
+            elif "sftpuser" in data:
+                return "Password: "
+            elif "sftppass" in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer complete.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        output = transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        assert "admin:" in output
+        assert channel.sent_writes[1] == "y\n"
+
+    def test_single_buffer_proceed_confirmation(self, transport_config):
+        """4. Single-buffer proceed confirmation: FILE_GATHER_COMPLETE -> PROCEED_CONFIRM_DETECTED -> send y\n."""
+        def responder(data, writes):
+            if "file get" in data:
+                return ("Please wait while the system is gathering files info ...\n"
+                        "Get file: active/cm/trace/ccm/sdl/SDL001_100_000086.txt.gzo\n"
+                        "done.\n"
+                        "Sub-directories were not traversed.\n"
+                        "Number of files affected: 1\n"
+                        "Total size in Bytes: 5462149\n"
+                        "Total size in Kbytes: 5334.13\n"
+                        "Would you like to proceed [y/n]? ")
+            elif data == "y\n":
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                return "User: "
+            elif "sftpuser" in data:
+                return "Password: "
+            elif "sftppass" in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer complete.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        output = transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        assert "admin:" in output
+        assert channel.sent_writes[1] == "y\n"
+
+    def test_proceed_confirm_sent_exactly_once(self, transport_config):
+        """5. Verify proceed 'y\\n' is sent exactly ONCE."""
+        def responder(data, writes):
+            if "file get" in data:
+                return ("done.\n"
+                        "Would you like to proceed [y/n]? ")
+            elif data == "y\n":
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                return "User: "
+            elif "sftpuser" in data:
+                return "Password: "
+            elif "sftppass" in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer complete.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        y_writes = [w for w in channel.sent_writes if w == "y\n"]
+        assert len(y_writes) == 1, f"Expected exactly 1 'y\\n' write, got {len(y_writes)}"
+
+    def test_host_key_confirmation_answered_exactly_once(self, transport_config):
+        """6. Host-key confirmation is detected and answered exactly ONCE."""
+        def responder(data, writes):
+            if "file get" in data:
+                return "done.\nWould you like to proceed [y/n]? "
+            elif data == "y\n" and len(writes) == 2:
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                return ("The authenticity of host '10.10.10.10' can't be established.\n"
+                        "RSA key fingerprint is SHA256:abc123xyz.\n"
+                        "Are you sure you want to continue connecting (yes/no)? ")
+            elif data == "y\n" and len(writes) == 4:
+                return "User: "
+            elif "sftpuser" in data:
+                return "Password: "
+            elif "sftppass" in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer complete.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        assert channel.sent_writes[1] == "y\n"  # proceed confirm
+        assert channel.sent_writes[2] == "10.10.10.10\n"  # host
+        assert channel.sent_writes[3] == "y\n"  # host key confirm
+        assert channel.sent_writes.count("y\n") == 2
+
+    def test_same_host_key_confirm_cannot_retrigger(self, transport_config):
+        """7. Same host-key confirmation cannot repeatedly trigger after the state transition."""
+        def responder(data, writes):
+            if "file get" in data:
+                return "done.\nWould you like to proceed [y/n]? "
+            elif data == "y\n" and len(writes) == 2:
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                return "Please answer 'y' for <yes> or 'n' for no: "
+            elif data == "y\n" and len(writes) == 4:
+                return "User: "
+            elif "sftpuser" in data:
+                return "Password: "
+            elif "sftppass" in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer complete.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        assert channel.sent_writes[3] == "y\n"
+        assert channel.sent_writes[4] == "sftpuser\n"
+        assert channel.sent_writes.count("y\n") == 2
+
+    def test_multiple_sequential_events_in_one_buffer(self, transport_config):
+        """8. Multiple sequential events in one buffer are processed correctly."""
+        def responder(data, writes):
+            if "file get" in data:
+                return "done.\nWould you like to proceed [y/n]? "
+            elif data == "y\n":
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                # Deliver host-key confirm AND User: in the same channel chunk
+                return "Are you sure you want to continue connecting (yes/no)? User: "
+            elif "sftpuser" in data:
+                return "Password: "
+            elif "sftppass" in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer complete.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        assert "y\n" in channel.sent_writes
+        assert "sftpuser\n" in channel.sent_writes
+
+    def test_no_infinite_loop_on_same_buffer(self, transport_config):
+        """9. No infinite loop when the same buffer is re-evaluated."""
+        def responder(data, writes):
+            if "file get" in data:
+                return "done.\nWould you like to proceed [y/n]? "
+            elif data == "y\n" and len(writes) == 2:
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                return "User: "
+            elif "sftpuser" in data:
+                return "Password: "
+            elif "sftppass" in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer complete.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        assert len(channel.sent_writes) <= 10
+
+    def test_no_host_key_confirmation_path(self, transport_config):
+        """10. No host-key confirmation path: goes directly to username prompt."""
+        def responder(data, writes):
+            if "file get" in data:
+                return "done.\nWould you like to proceed [y/n]? "
+            elif data == "y\n":
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                return "User: "
+            elif "sftpuser" in data:
+                return "Password: "
+            elif "sftppass" in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer complete.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        assert channel.sent_writes[2] == "10.10.10.10\n"
+        assert channel.sent_writes[3] == "sftpuser\n"
+        assert channel.sent_writes.count("y\n") == 1
+
+    def test_credential_redaction(self, transport_config):
+        """11. Credential redaction test: sensitive passwords never appear in output or logs."""
+        secret_pass = "SuperSecretSFTPPass!@#"
+        def responder(data, writes):
+            if "file get" in data:
+                return "done.\nWould you like to proceed [y/n]? "
+            elif data == "y\n":
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                return "User: "
+            elif "sftpuser" in data:
+                return f"Password: {secret_pass}\n"
+            elif secret_pass in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer complete.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        output = transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password=secret_pass,
+            sftp_remote_dir="/uploads",
+        )
+        assert secret_pass not in output
+        assert "[REDACTED]" in output
+
+    def test_transfer_success(self, transport_config):
+        """12. Transfer success: full workflow through all prompts to admin:."""
+        def responder(data, writes):
+            if "file get" in data:
+                return "done.\nWould you like to proceed [y/n]? "
+            elif data == "y\n":
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                return "User: "
+            elif "sftpuser" in data:
+                return "Password: "
+            elif "sftppass" in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer complete.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        output = transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        assert output.strip().endswith("admin:")
+        assert "Transfer complete." in output
+
+    def test_transfer_failure(self, transport_config):
+        """13. Transfer failure: handles error prompt gracefully."""
+        def responder(data, writes):
+            if "file get" in data:
+                return "done.\nWould you like to proceed [y/n]? "
+            elif data == "y\n":
+                return "SFTP host: "
+            elif "10.10.10.10" in data:
+                return "User: "
+            elif "sftpuser" in data:
+                return "Password: "
+            elif "sftppass" in data:
+                return "Destination directory: "
+            elif "/uploads" in data:
+                return "Transfer failed: connection refused.\nadmin:"
+            return ""
+
+        channel = MockStreamChannel(responder)
+        transport = _create_stream_transport(transport_config, channel)
+        output = transport.execute_file_get(
+            filename="SDL001_100_000086.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        assert "Transfer failed" in output
+        assert "admin:" in output
+
 
 # --- Model Tests ---
 
@@ -1588,6 +2083,68 @@ class TestCUCMClient:
         assert diag["sdl_files"]["status"] == "PASS"
         assert "13 SDL file(s) found" in diag["sdl_files"]["details"]
 
+    def test_execute_file_get_with_collector_arguments(self, cucm_client):
+        """Regression test: verify execute_file_get can be called with the collector's current arguments."""
+        cucm_client.connect()
+        output = cucm_client.execute_file_get(
+            filename="SDL001_100_000079.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+            remote_path="activelog /cm/trace/ccm/sdl",
+            sftp_port=22,
+        )
+        assert "File get successful" in output
+
+    def test_execute_file_get_threads_sftp_port(self, cucm_client, mock_transport):
+        """Regression test: verify sftp_port is threaded to the transport."""
+        cucm_client.connect()
+        from unittest.mock import MagicMock
+        mock_transport.execute_file_get = MagicMock(return_value="OK")
+        output = cucm_client.execute_file_get(
+            filename="SDL001_100_000079.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+            remote_path="activelog /cm/trace/ccm/sdl",
+            sftp_port=2222,
+        )
+        assert output == "OK"
+        mock_transport.execute_file_get.assert_called_once_with(
+            filename="SDL001_100_000079.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+            remote_path="activelog /cm/trace/ccm/sdl",
+            sftp_port=2222,
+        )
+
+    def test_execute_file_get_default_port(self, cucm_client, mock_transport):
+        """Regression test: verify sftp_port defaults to 22 when omitted."""
+        cucm_client.connect()
+        from unittest.mock import MagicMock
+        mock_transport.execute_file_get = MagicMock(return_value="OK")
+        output = cucm_client.execute_file_get(
+            filename="SDL001_100_000079.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+        )
+        assert output == "OK"
+        mock_transport.execute_file_get.assert_called_once_with(
+            filename="SDL001_100_000079.txt.gzo",
+            sftp_host="10.10.10.10",
+            sftp_username="sftpuser",
+            sftp_password="sftppass",
+            sftp_remote_dir="/uploads",
+            remote_path="activelog /cm/trace/ccm/sdl",
+            sftp_port=22,
+        )
+
 
 # --- Collector Tests ---
 
@@ -1686,6 +2243,59 @@ class TestCUCMTraceCollector:
         assert not result.success
         assert result.method == "config"
         assert "SFTP" in result.error
+
+    def test_locate_remote_file_direct_path(self, cucm_client):
+        """Test _locate_remote_file when file is directly in remote_dir."""
+        from unittest.mock import MagicMock
+        collector = CUCMTraceCollector(client=cucm_client)
+        mock_sftp = MagicMock()
+        mock_sftp.stat.return_value = MagicMock()
+
+        path = collector._locate_remote_file(mock_sftp, "/tmp/sftp/123", "trace.txt.gzo")
+        assert path == "/tmp/sftp/123/trace.txt.gzo"
+        mock_sftp.stat.assert_called_once_with("/tmp/sftp/123/trace.txt.gzo")
+
+    def test_locate_remote_file_cucm_nested_structure(self, cucm_client):
+        """Test _locate_remote_file locates file in CUCM nested directory structure."""
+        from unittest.mock import MagicMock
+        import stat
+        collector = CUCMTraceCollector(client=cucm_client)
+        mock_sftp = MagicMock()
+
+        mock_sftp.stat.side_effect = [FileNotFoundError("Not found"), MagicMock()]
+
+        attr_dir = MagicMock()
+        attr_dir.filename = "10.10.10.10"
+        attr_dir.st_mode = stat.S_IFDIR
+
+        attr_file = MagicMock()
+        attr_file.filename = "trace.txt.gzo"
+        attr_file.st_mode = stat.S_IFREG
+
+        def listdir_attr(path):
+            if path == "/tmp/sftp/123":
+                return [attr_dir]
+            elif path == "/tmp/sftp/123/10.10.10.10":
+                return [attr_file]
+            return []
+
+        mock_sftp.listdir_attr.side_effect = listdir_attr
+
+        path = collector._locate_remote_file(mock_sftp, "/tmp/sftp/123", "trace.txt.gzo")
+        assert path == "/tmp/sftp/123/10.10.10.10/trace.txt.gzo"
+        assert collector._last_located_paths["/tmp/sftp/123/trace.txt.gzo"] == "/tmp/sftp/123/10.10.10.10/trace.txt.gzo"
+
+    def test_locate_remote_file_not_found_raises(self, cucm_client):
+        """Test _locate_remote_file raises CUCMTraceCollectionError when not found."""
+        from unittest.mock import MagicMock
+        collector = CUCMTraceCollector(client=cucm_client)
+        mock_sftp = MagicMock()
+        mock_sftp.stat.side_effect = FileNotFoundError("Not found")
+        mock_sftp.listdir_attr.return_value = []
+
+        with pytest.raises(CUCMTraceCollectionError) as exc_info:
+            collector._locate_remote_file(mock_sftp, "/tmp/sftp/123", "trace.txt.gzo")
+        assert "File not found on SFTP server" in str(exc_info.value)
 
 
 # --- Collector Selection Tests ---
@@ -2056,6 +2666,7 @@ class TestCUCMConnectionFlow:
                 sftp_password: str,
                 sftp_remote_dir: str,
                 remote_path: str = "activelog /cm/trace/ccm/sdl",
+                sftp_port: int = 22,
             ) -> str:
                 return ""
 

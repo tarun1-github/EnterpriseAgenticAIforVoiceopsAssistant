@@ -181,6 +181,7 @@ class CUCMClient:
         sftp_password: str,
         sftp_remote_dir: str,
         remote_path: str = "activelog /cm/trace/ccm/sdl",
+        sftp_port: int = 22,
     ) -> str:
         """Execute CUCM 'file get' to transfer SDL file via SFTP.
 
@@ -191,6 +192,7 @@ class CUCMClient:
             sftp_password: SFTP password.
             sftp_remote_dir: Remote directory on SFTP server.
             remote_path: CUCM source directory.
+            sftp_port: SFTP server port (default: 22).
 
         Returns:
             Command output from CUCM.
@@ -202,7 +204,7 @@ class CUCMClient:
         if not self.is_connected():
             raise CUCMConnectionError("Not connected to CUCM")
 
-        logger.info("Executing CUCM file-get: filename=%s sftp_host=%s", filename, sftp_host)
+        logger.info("Executing CUCM file-get: filename=%s sftp_host=%s sftp_port=%s", filename, sftp_host, sftp_port)
         return self._transport.execute_file_get(
             filename=filename,
             sftp_host=sftp_host,
@@ -210,6 +212,7 @@ class CUCMClient:
             sftp_password=sftp_password,
             sftp_remote_dir=sftp_remote_dir,
             remote_path=remote_path,
+            sftp_port=sftp_port,
         )
 
     def run_diagnostic(self) -> dict:

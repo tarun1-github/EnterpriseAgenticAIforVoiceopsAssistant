@@ -43,7 +43,7 @@ class TransportConfig:
     password: str = ""
     timeout: int = 30
     command_timeout: int = 60
-    prompt_timeout: int = 15
+    prompt_timeout: int = 30
 
 
 class CUCMTransport(ABC):
@@ -88,6 +88,7 @@ class CUCMTransport(ABC):
         sftp_password: str,
         sftp_remote_dir: str,
         remote_path: str = "activelog /cm/trace/ccm/sdl",
+        sftp_port: int = 22,
     ) -> str:
         """Execute interactive CUCM 'file get' command for SFTP transfer."""
         pass
@@ -289,6 +290,11 @@ class NetmikoTransport(CUCMTransport):
         """Close SSH connection."""
         if self._connection and self._connected:
             try:
+                if hasattr(self._connection, "remote_conn") and self._connection.remote_conn:
+                    try:
+                        self._connection.remote_conn.close()
+                    except Exception:
+                        pass
                 self._connection.disconnect()
                 logger.info("CUCM connection closed")
             except Exception as e:
@@ -445,6 +451,7 @@ class CUCMTransport(ABC):
         sftp_password: str,
         sftp_remote_dir: str,
         remote_path: str = "activelog /cm/trace/ccm/sdl",
+        sftp_port: int = 22,
     ) -> str:
         """Execute interactive CUCM 'file get' command for SFTP transfer."""
         pass
@@ -728,29 +735,38 @@ class NetmikoTransport(CUCMTransport):
     def _detect_prompt(self, buffer: str) -> Optional[str]:
         """Detect the current prompt type from buffer.
 
-        Returns the prompt type: 'host', 'confirm', 'username', 'password', 'directory', 'admin', or None.
+        Returns the prompt type: 'host', 'confirm', 'proceed_confirm', 'port', 'username', 'password', 'directory', 'admin', or None.
         """
         buffer_lower = buffer.lower()
 
-        # Check for host-key confirmation (yes/no) prompt - must check BEFORE host prompt
+        # Check for PROCEED_CONFIRM - exact live CUCM prompt (must check FIRST)
+        if re.search(r"would\s+you\s+like\s+to\s+proceed\s*\[y/n\]", buffer_lower):
+            return "proceed_confirm"
+
+        # Check for host-key / initial confirmation (yes/no) prompt - must check BEFORE host prompt
         # Pattern: "Please answer 'y' for <yes> or 'n' for no:" or similar variations
         if re.search(r"please\s+answer.*[yn].*(yes|no)", buffer_lower) or \
            re.search(r"answer.*[yn].*(yes|no)", buffer_lower) or \
            re.search(r"\(y/n\)", buffer_lower) or \
            re.search(r"\[yes/no\]", buffer_lower) or \
-           (re.search(r"are you sure", buffer_lower) and re.search(r"(yes|no)", buffer_lower)) or \
-           re.search(r"would\s+you\s+like\s+to\s+proceed\s*\[y/n\]", buffer_lower):
+           (re.search(r"are you sure", buffer_lower) and re.search(r"(yes|no)", buffer_lower)):
             return "confirm"
 
-        # Check for SFTP host prompt - various forms
-        if re.search(r"(sftp|ssh).*host", buffer_lower) or \
+        # Check for SFTP port prompt
+        if re.search(r"(?:sftp\s*(?:server\s*)?)?port\s*(?:\[[^\]]*\])?\s*:", buffer_lower):
+            return "port"
+
+        # Check for SFTP host prompt - various forms including "SFTP server IP:"
+        if re.search(r"(?:sftp|ssh).*host", buffer_lower) or \
            re.search(r"remote.*host", buffer_lower) or \
            re.search(r"destination.*host", buffer_lower) or \
-           re.search(r"server.*name", buffer_lower):
+           re.search(r"server.*name", buffer_lower) or \
+           re.search(r"sftp\s*(?:server\s*)?(?:ip|host)", buffer_lower):
             return "host"
 
-        # Check for username prompt
+        # Check for username prompt (including "User ID:", "Username:", "User name:", "Login name:", but not "User:")
         if re.search(r"(user|login).*name", buffer_lower) or \
+           re.search(r"user\s*id", buffer_lower) or \
            re.search(r"username", buffer_lower):
             return "username"
 
@@ -758,8 +774,8 @@ class NetmikoTransport(CUCMTransport):
         if re.search(r"password", buffer_lower) and not re.search(r"password.*again", buffer_lower):
             return "password"
 
-        # Check for directory prompt
-        if re.search(r"(destination|remote).*dir", buffer_lower) or \
+        # Check for directory prompt (including "Download directory:")
+        if re.search(r"(destination|remote|download).*dir", buffer_lower) or \
            re.search(r"directory", buffer_lower) or \
            re.search(r"path", buffer_lower):
             return "directory"
@@ -778,39 +794,42 @@ class NetmikoTransport(CUCMTransport):
         sftp_password: str,
         sftp_remote_dir: str,
         remote_path: str = "activelog /cm/trace/ccm/sdl",
+        sftp_port: int = 22,
     ) -> str:
         """Execute interactive CUCM 'file get' command for SFTP transfer.
 
-        State machine for CUCM 15 interactive file-get:
+        Stream-based state machine for CUCM 15 interactive file-get:
         1. Send 'file get ...' command
-        2. Wait for initial confirmation (CUCM overwrite prompt):
-           - "Please answer 'y' for <yes> or 'n' for <no>:" -> send 'y'
-        3. Wait for file-gathering phase:
-           - "Please wait while the system is gathering files info ..."
-           - "Get file: ..."
-           - "done."
-        4. Wait for SFTP host prompt -> send host
-        5. Wait for host-key confirmation (yes/no) -> send 'y'
-        6. Wait for username prompt -> send username
-        7. Wait for password prompt -> send password (never logged)
-        8. Wait for destination directory prompt -> send directory
-        9. Handle optional confirmation prompt -> send 'y'
-        10. Wait for transfer completion (admin: prompt)
+        2. WAITING_FOR_INITIAL_RESPONSE:
+           - INITIAL_CONFIRM_DETECTED -> send 'y' -> WAITING_FOR_FILE_GATHER
+           - OR FILE_GATHER_STARTED -> WAITING_FOR_FILE_GATHER
+        3. WAITING_FOR_FILE_GATHER:
+           - FILE_GATHER_COMPLETE ('done.' or file stats) -> WAITING_FOR_PROCEED_CONFIRM
+        4. WAITING_FOR_PROCEED_CONFIRM:
+           - PROCEED_CONFIRM_DETECTED ('Would you like to proceed [y/n]?') -> send 'y' -> WAITING_FOR_HOST
+           - OR HOST_PROMPT_DETECTED (if proceed skipped) -> send host -> WAITING_FOR_CONFIRM
+        5. WAITING_FOR_HOST:
+           - HOST_PROMPT_DETECTED ('SFTP server IP:', 'SFTP host:', etc.) -> send host -> WAITING_FOR_CONFIRM
+        6. WAITING_FOR_CONFIRM:
+           - If port prompt ('SFTP server port [22]:'): send port -> continue
+           - If host-key confirm required: HOST_KEY_CONFIRM_DETECTED -> send 'y' -> WAITING_FOR_USERNAME
+           - If host-key confirm NOT required: USERNAME_PROMPT_DETECTED -> send username -> WAITING_FOR_PASSWORD
+        7. WAITING_FOR_USERNAME:
+           - If port prompt: send port -> continue
+           - If host-key confirm: send 'y' -> continue
+           - USERNAME_PROMPT_DETECTED ('User ID:', 'Username:', 'User:') -> send username -> WAITING_FOR_PASSWORD
+        8. WAITING_FOR_PASSWORD:
+           - PASSWORD_PROMPT_DETECTED -> send password -> WAITING_FOR_DIRECTORY
+        9. WAITING_FOR_DIRECTORY:
+           - DIRECTORY_PROMPT_DETECTED ('Download directory:', 'Destination directory:', etc.) -> send directory -> WAITING_FOR_FINAL_CONFIRM
+        10. WAITING_FOR_FINAL_CONFIRM:
+            - FINAL_CONFIRM_DETECTED -> send 'y' -> TRANSFER_STARTED
+            - OR TRANSFER_STARTED (if no final confirm)
+        11. TRANSFER_STARTED:
+            - TRANSFER_COMPLETE / ADMIN_PROMPT_DETECTED ('admin:' prompt returned)
 
-        Args:
-            filename: Name of the SDL file to transfer.
-            sftp_host: SFTP server hostname/IP.
-            sftp_username: SFTP username.
-            sftp_password: SFTP password (never logged).
-            sftp_remote_dir: Remote directory on SFTP server.
-            remote_path: CUCM source directory.
-
-        Returns:
-            Command output from CUCM (redacted).
-
-        Raises:
-            CUCMCommandError: If command fails or transfer fails.
-            CUCMTimeoutError: If transfer times out.
+        All transitions consume the matched event by advancing `cursor` past the match,
+        guaranteeing that already-processed input is never detected again.
         """
         if not self.is_connected():
             raise CUCMConnectionError("Not connected to CUCM")
@@ -818,7 +837,7 @@ class NetmikoTransport(CUCMTransport):
         full_remote_path = f"{remote_path}/{filename}"
         command = f"file get {full_remote_path}"
 
-        logger.info("FILE_GET_SENT: filename=%s sftp_host=%s", filename, sftp_host)
+        logger.info("FILE_GET_SENT: filename=%s sftp_host=%s sftp_port=%s", filename, sftp_host, sftp_port)
 
         # Secrets to redact from logs
         secrets = [sftp_password, self.config.password]
@@ -826,14 +845,17 @@ class NetmikoTransport(CUCMTransport):
             secrets.append(sftp_username)
 
         def _sanitize_preview(text: str, max_len: int = 200) -> str:
-            """Return redacted preview of text, limited to max_len chars."""
+            """Return redacted preview of text, limited to max_len chars.
+            
+            Shows the tail (most recent output) if text exceeds max_len,
+            ensuring prompt diagnostics reflect current state.
+            """
             if not text:
                 return ""
             sanitized = self._redact_secrets(text, secrets)
-            # Replace newlines and limit length
             sanitized = sanitized.replace("\n", "\\n").replace("\r", "\\r")
             if len(sanitized) > max_len:
-                sanitized = sanitized[:max_len] + "..."
+                sanitized = "..." + sanitized[-max_len:]
             return sanitized
 
         def _log_state_transition(new_state: str, prompt_type: str = None, preview: str = None):
@@ -845,47 +867,47 @@ class NetmikoTransport(CUCMTransport):
             else:
                 logger.info("STATE_TRANSITION: state=%s", new_state)
 
-        def _check_file_gather_complete(buffer: str) -> bool:
-            """Check if file-gathering phase has completed (detect 'done.' line)."""
-            # Look for "done." as a standalone line (allowing CR/LF and whitespace)
-            import re
-            # Match "done." at end of line, possibly preceded by whitespace
-            return bool(re.search(r'(^|\n)\s*done\.\s*($|\n)', buffer))
-
-        def _check_proceed_confirm(buffer: str) -> bool:
-            """Check if CUCM is asking to proceed after file-gather.
-            
-            Matches: "Would you like to proceed [y/n]?"
-            """
-            import re
-            return bool(re.search(r"would\s+you\s+like\s+to\s+proceed\s*\[y/n\]", buffer.lower()))
+        # Comprehensive prompt regex patterns for Cisco CUCM 15 VOS interactive CLI:
+        r_host_pattern = (
+            r"(?!(?:sftp\s*(?:server\s*)?)?port\b)"
+            r"(?:sftp\s*(?:server\s*)?(?:ip|host|name|fqdn)?|(?:remote|destination)\s*(?:host|server|ip)?|server\s*(?:name|ip)?|\bhost)"
+            r"(?:[\s/]+(?!port\b)[a-z]+)*\s*(?:\[[^\]]*\])?\s*:"
+        )
+        r_port_pattern = r"(?:sftp\s*(?:server\s*)?)?port\s*(?:\[[^\]]*\])?\s*:"
+        r_user_pattern = r"(?:user\s*(?:id|name)?|username|login\s*(?:name)?)\s*:|(?:^|\n)\s*user\s*:"
+        r_pass_pattern = r"(?:enter\s+)?(?:sftp\s+)?password\s*:"
+        r_dir_pattern = r"(?:(?:download|destination|remote)\s*)?dir(?:ectory)?\s*:|(?:^|\n)\s*path\s*:"
+        r_proceed_pattern = r"would\s+you\s+like\s+to\s+proceed\s*(\[y/n\]|\(y/n\))\??|would\s+you\s+like\s+to\s+proceed"
+        r_host_key_pattern = (
+            r"are\s+you\s+sure\s+you\s+want\s+to\s+continue\s+connecting.*?(?:yes/no|\(yes/no\))|"
+            r"authenticity\s+of\s+host.*?(?:yes/no|\(yes/no\))|"
+            r"please\s+answer.*?[yn].*?(?:yes|no):?|"
+            r"answer\s+['\"]?[yn]['\"]?.*?(?:yes|no):?|"
+            r"\(yes/no\):?|\[yes/no\]:?|\(y/n\):?"
+        )
+        r_final_confirm_pattern = r"continue\?\s*\(y/n\):?|\(y/n\):?|\[yes/no\]:?|continue\s+connecting"
 
         try:
-            # Send the initial command
             channel = self._connection.remote_conn
-            channel.send(command + "\n")
 
-            # State machine - wait for initial response (confirmation OR file-gather)
+            def _send_channel(data: str):
+                if hasattr(channel, "sendall"):
+                    try:
+                        channel.sendall(data.encode("utf-8") if isinstance(data, str) else data)
+                        return
+                    except Exception:
+                        pass
+                channel.send(data)
+
+            _send_channel(command + "\n")
+
             state = "WAITING_FOR_INITIAL_RESPONSE"
             output_buffer = ""
+            cursor = 0
             overall_start = time.time()
             overall_timeout = 600  # 10 minutes total
-            prompt_timeout = 30   # 30 seconds per prompt
+            prompt_timeout = 30    # 30 seconds per prompt
             prompt_wait_start = time.time()
-
-            # Track what we've sent to avoid re-sending
-            sent_initial_confirm = False
-            sent_host = False
-            sent_host_key_confirm = False
-            sent_proceed_confirm = False
-            sent_username = False
-            sent_password = False
-            sent_directory = False
-            sent_final_confirm = False
-
-            # Buffer cursor: tracks how much of output_buffer has been processed
-            # This prevents re-detecting the same prompt from the same buffer
-            buffer_processed = 0
 
             # Drain any immediate output without blocking
             def _drain_available():
@@ -894,213 +916,258 @@ class NetmikoTransport(CUCMTransport):
                     chunk = channel.recv(4096).decode("utf-8", errors="ignore")
                     output_buffer += chunk
 
-            # Initial drain - don't wait if data already available
             _drain_available()
             _log_state_transition("WAITING_FOR_INITIAL_RESPONSE")
 
             while time.time() - overall_start < overall_timeout:
-                data_available = channel.recv_ready()
-                if data_available:
+                if channel.recv_ready():
                     _drain_available()
-                    prompt_wait_start = time.time()  # Reset prompt timeout on data
+                    prompt_wait_start = time.time()
 
-                    # Process accumulated buffer: keep re-processing as long as state changes
-                    # This handles cases where one channel read contains multiple sequential events
+                if cursor < len(output_buffer):
+                    # Process accumulated buffer as a stream using cursor semantics
                     state_changed = True
+                    max_transitions_per_drain = 20
+                    transition_count = 0
+
                     while state_changed:
                         state_changed = False
-                        prev_state = state
+                        transition_count += 1
+                        if transition_count > max_transitions_per_drain:
+                            logger.warning("Safety guard: exceeded max state transitions (%d) in single drain", max_transitions_per_drain)
+                            break
 
-                        # Only examine unprocessed portion of buffer
-                        unprocessed = output_buffer[buffer_processed:]
-                        
+                        unconsumed = output_buffer[cursor:]
+                        if not unconsumed:
+                            break
+
                         if state == "WAITING_FOR_INITIAL_RESPONSE":
-                            # Check for initial CUCM overwrite confirmation
-                            prompt_type = self._detect_prompt(unprocessed)
-                            if prompt_type == "confirm":
+                            # Check for initial CUCM overwrite confirmation prompt
+                            m_init_confirm = re.search(r"please\s+answer.*?[yn].*?(?:yes|no):?", unconsumed, re.IGNORECASE) or \
+                                             re.search(r"answer\s+['\"]?[yn]['\"]?.*?(?:yes|no):?", unconsumed, re.IGNORECASE)
+                            m_gather_indicators = re.search(r"gathering\s+files\s+info", unconsumed, re.IGNORECASE) or \
+                                                  re.search(r"get\s+file:", unconsumed, re.IGNORECASE) or \
+                                                  re.search(r"\bdone\.", unconsumed) or \
+                                                  re.search(r"would\s+you\s+like\s+to\s+proceed", unconsumed, re.IGNORECASE)
+
+                            if m_init_confirm:
+                                cursor += m_init_confirm.end()
                                 preview = _sanitize_preview(output_buffer)
-                                _log_state_transition("INITIAL_CONFIRM_DETECTED", prompt_type, preview)
-                                channel.send("y\n")
-                                sent_initial_confirm = True
+                                _log_state_transition("INITIAL_CONFIRM_DETECTED", "initial_confirm", preview)
+                                _send_channel("y\n")
                                 state = "WAITING_FOR_FILE_GATHER"
                                 _log_state_transition("WAITING_FOR_FILE_GATHER")
-                                buffer_processed = len(output_buffer)  # Consume all
                                 state_changed = True
-                            elif "gathering files info" in output_buffer.lower():
-                                # File-gather output arrived without initial confirmation
-                                _log_state_transition("FILE_GATHER_STARTED")
+                                prompt_wait_start = time.time()
+                            elif m_gather_indicators:
+                                m_start = re.search(r"gathering\s+files\s+info", unconsumed, re.IGNORECASE)
+                                if m_start:
+                                    cursor += m_start.end()
+                                    _log_state_transition("FILE_GATHER_STARTED", "gather_started", _sanitize_preview(output_buffer))
+                                else:
+                                    _log_state_transition("FILE_GATHER_STARTED")
                                 state = "WAITING_FOR_FILE_GATHER"
                                 _log_state_transition("WAITING_FOR_FILE_GATHER")
-                                buffer_processed = len(output_buffer)
                                 state_changed = True
+                                prompt_wait_start = time.time()
+
                         elif state == "WAITING_FOR_FILE_GATHER":
-                            # Check for file-gathering phase completion
-                            if _check_file_gather_complete(output_buffer):
+                            # Check if file gather completed ('done.' line or file statistics)
+                            m_done = re.search(r'(?:^|\n)\s*done\.\s*(?:\r?\n|$)', unconsumed) or \
+                                     re.search(r'\bdone\.\s*', unconsumed)
+                            m_proceed_early = re.search(r"would\s+you\s+like\s+to\s+proceed", unconsumed, re.IGNORECASE)
+                            if m_done:
+                                cursor += m_done.end()
                                 preview = _sanitize_preview(output_buffer)
                                 _log_state_transition("FILE_GATHER_COMPLETE", preview=preview)
-                                
-                                # ENHANCED DIAGNOSTIC: Capture what CUCM sends after done.
-                                # 1. Log complete accumulated buffer tail (max 1000 chars)
-                                buffer_tail = _sanitize_preview(output_buffer, max_len=1000)
-                                logger.info("POST_GATHER_BUFFER_TAIL: %s", buffer_tail)
-                                
-                                # 2. Log last 300 chars after standalone "done." marker
-                                import re
-                                done_match = re.search(r'(?s)(done\..*)$', output_buffer)
-                                if done_match:
-                                    after_done = done_match.group(1)
-                                    after_done_preview = _sanitize_preview(after_done, max_len=300)
-                                    logger.info("POST_GATHER_AFTER_DONE: %s", after_done_preview)
-                                
-                                # 3. Run _detect_prompt() against COMPLETE accumulated buffer
-                                prompt_from_buffer = self._detect_prompt(output_buffer)
-                                logger.info("POST_GATHER_PROMPT_FROM_BUFFER: %s", prompt_from_buffer if prompt_from_buffer else "none")
-                                
-                                # 4. Short non-blocking drain for any additional data
-                                post_gather_buffer = ""
-                                while channel.recv_ready():
-                                    chunk = channel.recv(4096).decode("utf-8", errors="ignore")
-                                    post_gather_buffer += chunk
-                                    output_buffer += chunk
-                                
-                                # 5. If additional data exists, log it
-                                if post_gather_buffer:
-                                    new_data_preview = _sanitize_preview(post_gather_buffer, max_len=500)
-                                    logger.info("POST_GATHER_NEW_DATA: %s", new_data_preview)
-                                    
-                                    # 6. Run _detect_prompt() against newly received data
-                                    prompt_from_new = self._detect_prompt(post_gather_buffer)
-                                    logger.info("POST_GATHER_PROMPT_FROM_NEW_DATA: %s", prompt_from_new if prompt_from_new else "none")
-                                
-                                # Check for CUCM "proceed" confirmation after file-gather
-                                if _check_proceed_confirm(output_buffer):
-                                    _log_state_transition("WAITING_FOR_PROCEED_CONFIRM")
-                                    state = "WAITING_FOR_PROCEED_CONFIRM"
-                                else:
-                                    state = "WAITING_FOR_HOST"
-                                    _log_state_transition("WAITING_FOR_HOST")
-                                buffer_processed = len(output_buffer)
+                                state = "WAITING_FOR_PROCEED_CONFIRM"
+                                _log_state_transition("WAITING_FOR_PROCEED_CONFIRM")
                                 state_changed = True
-                            else:
-                                # Still in file-gathering phase, log progress
-                                if "gathering files info" in output_buffer.lower():
+                                prompt_wait_start = time.time()
+                            elif m_proceed_early:
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("FILE_GATHER_COMPLETE", preview=preview)
+                                state = "WAITING_FOR_PROCEED_CONFIRM"
+                                _log_state_transition("WAITING_FOR_PROCEED_CONFIRM")
+                                state_changed = True
+                                prompt_wait_start = time.time()
+                            elif "gathering files info" in unconsumed.lower():
+                                m_start = re.search(r"gathering\s+files\s+info", unconsumed, re.IGNORECASE)
+                                if m_start:
+                                    cursor += m_start.end()
                                     _log_state_transition("FILE_GATHER_STARTED")
-                                elif "get file:" in output_buffer.lower():
-                                    pass
-                        else:
-                            # Detect current prompt for SFTP phase - only examine unprocessed portion
-                            unprocessed = output_buffer[buffer_processed:]
-                            prompt_type = self._detect_prompt(unprocessed)
+                                    state_changed = True
+                                    prompt_wait_start = time.time()
 
-                            if state == "WAITING_FOR_PROCEED_CONFIRM":
-                                # Handle CUCM "Would you like to proceed [y/n]?" prompt
-                                if prompt_type == "confirm" and not sent_proceed_confirm:
-                                    preview = _sanitize_preview(output_buffer)
-                                    _log_state_transition("PROCEED_CONFIRM_DETECTED", prompt_type, preview)
-                                    channel.send("y\n")
-                                    sent_proceed_confirm = True
-                                    state = "WAITING_FOR_HOST"
-                                    _log_state_transition("WAITING_FOR_HOST")
-                                    buffer_processed = len(output_buffer)
-                                    state_changed = True
-                            elif state == "WAITING_FOR_HOST":
-                                if prompt_type == "host":
-                                    preview = _sanitize_preview(output_buffer)
-                                    _log_state_transition("HOST_PROMPT_DETECTED", prompt_type, preview)
-                                    channel.send(sftp_host + "\n")
-                                    sent_host = True
-                                    state = "WAITING_FOR_CONFIRM"
-                                    buffer_processed = len(output_buffer)
-                                    state_changed = True
-                                elif prompt_type == "confirm" and not sent_host:
-                                    # Sometimes host-key confirmation comes immediately
-                                    preview = _sanitize_preview(output_buffer)
-                                    _log_state_transition("HOST_KEY_CONFIRM_DETECTED", prompt_type, preview)
-                                    channel.send("y\n")
-                                    sent_host_key_confirm = True
-                                    buffer_processed = len(output_buffer)
-                                    # Stay in WAITING_FOR_HOST, expect host prompt next
-                            elif state == "WAITING_FOR_CONFIRM":
-                                if prompt_type == "confirm":
-                                    preview = _sanitize_preview(output_buffer)
-                                    _log_state_transition("HOST_KEY_CONFIRM_DETECTED", prompt_type, preview)
-                                    channel.send("y\n")
-                                    sent_host_key_confirm = True
-                                    state = "WAITING_FOR_USERNAME"
-                                    buffer_processed = len(output_buffer)
-                                    state_changed = True
-                                elif prompt_type == "username":
-                                    # No confirmation needed, go straight to username
-                                    preview = _sanitize_preview(output_buffer)
-                                    _log_state_transition("USERNAME_PROMPT_DETECTED", prompt_type, preview)
-                                    state = "WAITING_FOR_USERNAME"
-                                    buffer_processed = len(output_buffer)
-                                    state_changed = True
-                            elif state == "WAITING_FOR_USERNAME":
-                                if prompt_type == "username":
-                                    preview = _sanitize_preview(output_buffer)
-                                    _log_state_transition("USERNAME_PROMPT_DETECTED", prompt_type, preview)
-                                    channel.send(sftp_username + "\n")
-                                    sent_username = True
-                                    state = "WAITING_FOR_PASSWORD"
-                                    buffer_processed = len(output_buffer)
-                                    state_changed = True
-                            elif state == "WAITING_FOR_PASSWORD":
-                                if prompt_type == "password":
-                                    preview = _sanitize_preview(output_buffer)
-                                    _log_state_transition("PASSWORD_PROMPT_DETECTED", prompt_type, preview)
-                                    channel.send(sftp_password + "\n")
-                                    sent_password = True
-                                    state = "WAITING_FOR_DIRECTORY"
-                                    buffer_processed = len(output_buffer)
-                                    state_changed = True
-                            elif state == "WAITING_FOR_DIRECTORY":
-                                if prompt_type == "directory":
-                                    preview = _sanitize_preview(output_buffer)
-                                    _log_state_transition("DIRECTORY_PROMPT_DETECTED", prompt_type, preview)
-                                    channel.send(sftp_remote_dir + "\n")
-                                    sent_directory = True
-                                    state = "WAITING_FOR_FINAL_CONFIRM"
-                                    buffer_processed = len(output_buffer)
-                                    state_changed = True
-                            elif state == "WAITING_FOR_FINAL_CONFIRM":
-                                if prompt_type == "confirm":
-                                    preview = _sanitize_preview(output_buffer)
-                                    _log_state_transition("FINAL_CONFIRM_DETECTED", prompt_type, preview)
-                                    channel.send("y\n")
-                                    sent_final_confirm = True
-                                    state = "TRANSFER_STARTED"
-                                    buffer_processed = len(output_buffer)
-                                    state_changed = True
-                                elif prompt_type == "admin":
-                                    # No final confirmation, transfer starting
-                                    preview = _sanitize_preview(output_buffer)
-                                    _log_state_transition("TRANSFER_STARTED", prompt_type, preview)
-                                    state = "TRANSFER_STARTED"
-                                    buffer_processed = len(output_buffer)
-                                    state_changed = True
-                            elif state == "TRANSFER_STARTED":
-                                if prompt_type == "admin":
-                                    preview = _sanitize_preview(output_buffer)
-                                    _log_state_transition("TRANSFER_COMPLETE", prompt_type, preview)
-                                    _log_state_transition("ADMIN_PROMPT_DETECTED", prompt_type, preview)
-                                    logger.info("CUCM file-get completed: filename=%s", filename)
-                                    return self._redact_secrets(output_buffer, secrets)
+                        elif state == "WAITING_FOR_PROCEED_CONFIRM":
+                            # Check for CUCM prompt: "Would you like to proceed [y/n]?"
+                            m_proceed = re.search(r_proceed_pattern, unconsumed, re.IGNORECASE)
+                            m_host_direct = re.search(r_host_pattern, unconsumed, re.IGNORECASE)
+                            if m_proceed:
+                                cursor += m_proceed.end()
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("PROCEED_CONFIRM_DETECTED", "proceed_confirm", preview)
+                                _send_channel("y\n")
+                                state = "WAITING_FOR_HOST"
+                                _log_state_transition("WAITING_FOR_HOST")
+                                state_changed = True
+                                prompt_wait_start = time.time()
+                            elif m_host_direct:
+                                # Proceed confirm was skipped by CUCM; host prompt arrived directly
+                                cursor += m_host_direct.end()
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("HOST_PROMPT_DETECTED", "host", preview)
+                                _send_channel(sftp_host + "\n")
+                                state = "WAITING_FOR_CONFIRM"
+                                _log_state_transition("WAITING_FOR_CONFIRM")
+                                state_changed = True
+                                prompt_wait_start = time.time()
 
-                else:
-                    # No data available - check prompt timeout
-                    if time.time() - prompt_wait_start > prompt_timeout:
-                        # Log timeout state with sanitized buffer preview
-                        preview = _sanitize_preview(output_buffer) if output_buffer else "(no output)"
-                        logger.warning("PROMPT_TIMEOUT: state=%s waited=%ds preview=%s", state, prompt_timeout, preview)
-                        raise CUCMTimeoutError(
-                            f"CUCM file-get prompt timeout in state '{state}' after {prompt_timeout}s",
-                            timeout_type="file_get_prompt",
-                            timeout_value=prompt_timeout,
-                        )
-                    time.sleep(0.1)
+                        elif state == "WAITING_FOR_HOST":
+                            m_host = re.search(r_host_pattern, unconsumed, re.IGNORECASE)
+                            if m_host:
+                                cursor += m_host.end()
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("HOST_PROMPT_DETECTED", "host", preview)
+                                _send_channel(sftp_host + "\n")
+                                state = "WAITING_FOR_CONFIRM"
+                                _log_state_transition("WAITING_FOR_CONFIRM")
+                                state_changed = True
+                                prompt_wait_start = time.time()
 
-            # If we get here, we timed out
+                        elif state == "WAITING_FOR_CONFIRM":
+                            m_port = re.search(r_port_pattern, unconsumed, re.IGNORECASE)
+                            m_host_key = re.search(r_host_key_pattern, unconsumed, re.IGNORECASE)
+                            m_username = re.search(r_user_pattern, unconsumed, re.IGNORECASE)
+
+                            if m_port:
+                                cursor += m_port.end()
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("PORT_PROMPT_DETECTED", "port", preview)
+                                _send_channel(f"{sftp_port}\n")
+                                state_changed = True
+                                prompt_wait_start = time.time()
+                            elif m_host_key:
+                                cursor += m_host_key.end()
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("HOST_KEY_CONFIRM_DETECTED", "confirm", preview)
+                                _send_channel("y\n")
+                                state = "WAITING_FOR_USERNAME"
+                                _log_state_transition("WAITING_FOR_USERNAME")
+                                state_changed = True
+                                prompt_wait_start = time.time()
+                            elif m_username:
+                                cursor += m_username.end()
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("USERNAME_PROMPT_DETECTED", "username", preview)
+                                _send_channel(sftp_username + "\n")
+                                state = "WAITING_FOR_PASSWORD"
+                                _log_state_transition("WAITING_FOR_PASSWORD")
+                                state_changed = True
+                                prompt_wait_start = time.time()
+
+                        elif state == "WAITING_FOR_USERNAME":
+                            m_port = re.search(r_port_pattern, unconsumed, re.IGNORECASE)
+                            m_host_key = re.search(r_host_key_pattern, unconsumed, re.IGNORECASE)
+                            m_username = re.search(r_user_pattern, unconsumed, re.IGNORECASE)
+
+                            if m_port:
+                                cursor += m_port.end()
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("PORT_PROMPT_DETECTED", "port", preview)
+                                _send_channel(f"{sftp_port}\n")
+                                state_changed = True
+                                prompt_wait_start = time.time()
+                            elif m_host_key:
+                                cursor += m_host_key.end()
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("HOST_KEY_CONFIRM_DETECTED", "confirm", preview)
+                                _send_channel("y\n")
+                                state_changed = True
+                                prompt_wait_start = time.time()
+                            elif m_username:
+                                cursor += m_username.end()
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("USERNAME_PROMPT_DETECTED", "username", preview)
+                                _send_channel(sftp_username + "\n")
+                                state = "WAITING_FOR_PASSWORD"
+                                _log_state_transition("WAITING_FOR_PASSWORD")
+                                state_changed = True
+                                prompt_wait_start = time.time()
+
+                        elif state == "WAITING_FOR_PASSWORD":
+                            m_password = re.search(r_pass_pattern, unconsumed, re.IGNORECASE)
+                            # Check that it's not "password again"
+                            if m_password and not re.search(r"password\s+again", unconsumed[:m_password.end()], re.IGNORECASE):
+                                cursor += m_password.end()
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("PASSWORD_PROMPT_DETECTED", "password", preview)
+                                _send_channel(sftp_password + "\n")
+                                state = "WAITING_FOR_DIRECTORY"
+                                _log_state_transition("WAITING_FOR_DIRECTORY")
+                                state_changed = True
+                                prompt_wait_start = time.time()
+
+                        elif state == "WAITING_FOR_DIRECTORY":
+                            m_dir = re.search(r_dir_pattern, unconsumed, re.IGNORECASE)
+                            if m_dir:
+                                cursor += m_dir.end()
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("DIRECTORY_PROMPT_DETECTED", "directory", preview)
+                                _send_channel(sftp_remote_dir + "\n")
+                                state = "WAITING_FOR_FINAL_CONFIRM"
+                                _log_state_transition("WAITING_FOR_FINAL_CONFIRM")
+                                state_changed = True
+                                prompt_wait_start = time.time()
+
+                        elif state == "WAITING_FOR_FINAL_CONFIRM":
+                            m_final_confirm = re.search(r_final_confirm_pattern, unconsumed, re.IGNORECASE)
+                            m_admin = re.search(r"\badmin:\s*$", output_buffer.rstrip())
+                            if m_final_confirm:
+                                cursor += m_final_confirm.end()
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("FINAL_CONFIRM_DETECTED", "confirm", preview)
+                                _send_channel("y\n")
+                                state = "TRANSFER_STARTED"
+                                _log_state_transition("TRANSFER_STARTED")
+                                state_changed = True
+                                prompt_wait_start = time.time()
+                            elif m_admin or re.search(r"transfer", unconsumed, re.IGNORECASE):
+                                _log_state_transition("TRANSFER_STARTED")
+                                state = "TRANSFER_STARTED"
+                                state_changed = True
+                                prompt_wait_start = time.time()
+
+                        elif state == "TRANSFER_STARTED":
+                            m_admin = re.search(r"\badmin:\s*$", output_buffer.rstrip())
+                            if m_admin:
+                                preview = _sanitize_preview(output_buffer)
+                                _log_state_transition("TRANSFER_COMPLETE", "admin", preview)
+                                _log_state_transition("ADMIN_PROMPT_DETECTED", "admin", preview)
+                                logger.info("CUCM file-get completed: filename=%s", filename)
+                                return self._redact_secrets(output_buffer, secrets)
+
+                        # If admin prompt appears at any point after command output received, command finished or aborted
+                        if ("\n" in output_buffer.strip()) and re.search(r"\badmin:\s*$", output_buffer.rstrip()):
+                            preview = _sanitize_preview(output_buffer)
+                            _log_state_transition("TRANSFER_COMPLETE", "admin", preview)
+                            _log_state_transition("ADMIN_PROMPT_DETECTED", "admin", preview)
+                            logger.info("CUCM file-get completed (admin prompt returned): filename=%s", filename)
+                            return self._redact_secrets(output_buffer, secrets)
+
+                # After processing any available buffer transitions:
+                # If still waiting for next prompt, check prompt timeout and sleep
+                if time.time() - prompt_wait_start > prompt_timeout:
+                    preview = _sanitize_preview(output_buffer) if output_buffer else "(no output)"
+                    logger.warning("PROMPT_TIMEOUT: state=%s waited=%ds preview=%s", state, prompt_timeout, preview)
+                    raise CUCMTimeoutError(
+                        f"CUCM file-get prompt timeout in state '{state}' after {prompt_timeout}s",
+                        timeout_type="file_get_prompt",
+                        timeout_value=prompt_timeout,
+                    )
+                time.sleep(0.02)
+
+            # Overall timeout
             preview = _sanitize_preview(output_buffer) if output_buffer else "(no output)"
             logger.error("OVERALL_TIMEOUT: state=%s waited=%ds preview=%s", state, overall_timeout, preview)
             raise CUCMTimeoutError(

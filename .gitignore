@@ -39,3 +39,7 @@ logs/
 # Sensitive raw trace dumps (allow sample_data)
 traces/*
 !sample_data/
+
+# Persistent VoiceOps trace storage & workspace
+data/
+data/voiceops_traces/
