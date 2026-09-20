@@ -231,7 +231,7 @@ class NetmikoTransport(CUCMTransport):
             "auth_timeout": self.config.timeout,
             "banner_timeout": self.config.prompt_timeout,
             "conn_timeout": self.config.timeout,
-            "read_timeout_override": self.config.command_timeout,
+            "read_timeout_override": 300,  # Default 5 min for large file view commands
             "global_delay_factor": 1.5,
             "fast_cli": False,
             # We'll swap the class after ConnectHandler creates it
