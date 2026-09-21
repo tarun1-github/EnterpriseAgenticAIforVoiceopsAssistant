@@ -29,7 +29,9 @@ from app.commands.service import DeviceCommandService
 from app.commands.export import generate_command_filename, format_command_output_package, sanitize_command_for_filename
 from app.core.config import get_settings
 from app.core.logging import setup_logging
+from app.core.timestamps import to_ist_display, format_time_range_ist
 from app.correlation.engine import CorrelationEngine
+from app.correlation.ladder import CallLifecycleLadder
 from app.devices.cucm import CUCMClient, CUCMTraceCollector, TraceSelectionService, SelectionMode, RelativeTimeOption
 from app.devices.cucm.collector import CollectionResult
 from app.devices.cucm.selection import SelectionResult, SelectionRequest
@@ -38,6 +40,7 @@ from app.models.call_session import CallSession, CallArchitecture
 from app.models.event import DirectionEnum, ProtocolEnum, VoiceEvent
 from app.parsers.detector import detect_protocol
 from app.parsers.ingestion import TraceIngestionEngine
+from ui.sdl_analysis import render_sdl_analysis_tab
 
 # Initialize logging
 setup_logging()
@@ -547,7 +550,7 @@ def main():
 
     st.markdown("---")
 
-    # Ingestion & Operation Tabs (10 Dedicated Tabs)
+    # Ingestion & Operation Tabs (11 Dedicated Tabs)
     (
         tab_upload,
         tab_library,
@@ -556,6 +559,7 @@ def main():
         tab_protocols,
         tab_inspector,
         tab_analysis,
+        tab_sdl_analysis,
         tab_architecture,
         tab_cucm,
         tab_commands,
@@ -568,6 +572,7 @@ def main():
             "📊 Protocol View",
             "🔍 Event Inspector",
             "🧠 Analysis",
+            "🔬 SDL Trace Analysis",
             "🏗️ Architecture & RCA",
             "🖥️ CUCM Device",
             "⚡ Device Command Center",
@@ -579,23 +584,82 @@ def main():
     # =========================================================================
     with tab_upload:
         st.markdown("### Upload Cisco Trace Log Files")
-        st.markdown(
-            "Upload one or more raw Cisco debug files (`.txt`). Supported signaling traces include "
-            "`debug isdn q931`, `debug ccsip messages`, `debug mgcp packets`, mixed gateway logs, and `CUCM SDL/SDI`."
-        )
+        st.info("💡 **File names are optional metadata.** VoiceOps AI identifies trace type and devices primarily from **content**.")
+
+        with st.expander("📝 Recommended File Naming Convention (Optional)", expanded=False):
+            st.markdown(
+                """
+                Although strict naming is **not required**, the recommended naming format for engineers is:
+                ```text
+                <device>_<device-ip>_<trace-type>_<date>_<time>.txt
+                ```
+                **Examples:**
+                - `CUCM_10.197.206.141_SDL_20260920_154200.txt`
+                - `VG01_10.197.206.150_ISDN_Q931_20260920_154200.txt`
+                - `VG01_10.197.206.150_SIP_20260920_154200.txt`
+                - `CUBE01_10.197.206.160_SIP_20260920_154200.txt`
+
+                *Files with arbitrary names (such as `SDL001_100_000087.txt`, `debug_isdn_q931.txt`, `router_capture.txt`) will be classified accurately by content inspection.*
+                """
+            )
+
+        with st.expander("⚙️ Optional Upload Metadata & Overrides (Auto Detect by default)", expanded=False):
+            st.caption("Leave as 'Auto Detect' for automatic content detection, or specify device/trace properties:")
+            meta_col1, meta_col2, meta_col3 = st.columns(3)
+            with meta_col1:
+                opt_dev_type = st.selectbox(
+                    "Device Type",
+                    ["Auto Detect", "CUCM", "Voice Gateway", "CUBE", "IOS Router", "SIP Endpoint", "Other"],
+                    index=0,
+                    key="opt_meta_dev_type",
+                )
+                opt_trace_type = st.selectbox(
+                    "Trace Type",
+                    ["Auto Detect", "CUCM SDL", "ISDN/Q.931", "SIP", "MGCP", "CCAPI", "Mixed", "Other"],
+                    index=0,
+                    key="opt_meta_trace_type",
+                )
+            with meta_col2:
+                opt_dev_ip = st.text_input("Device IP (optional)", placeholder="e.g. 10.197.206.150", key="opt_meta_dev_ip")
+                opt_dev_name = st.text_input("Device Name (optional)", placeholder="e.g. VG01-HQ", key="opt_meta_dev_name")
+            with meta_col3:
+                opt_region = st.text_input("Region (optional)", placeholder="e.g. APAC / DC-Primary", key="opt_meta_region")
+                opt_tz = st.selectbox(
+                    "Timestamp Timezone",
+                    ["Auto Detect", "IST", "UTC", "PST", "CST", "EST"],
+                    index=0,
+                    key="opt_meta_tz",
+                    help="All timestamps are normalized and rendered in Asia/Kolkata (IST) in UI",
+                )
 
         uploaded_files = st.file_uploader(
-            "Select Cisco trace files",
+            "Select Cisco trace files (Batch upload supported)",
             type=["txt", "log"],
             accept_multiple_files=True,
-            help="Upload raw router/CUCM trace text dumps",
+            help="Upload raw router/CUCM trace text dumps. Multi-file correlation runs across all selected logs.",
         )
 
         if st.button("🚀 Ingest & Correlate Traces", type="primary", use_container_width=False):
             if uploaded_files:
-                with st.spinner("Executing deterministic parsers and correlation engine..."):
+                with st.spinner("Executing deterministic content classifier, protocol parsers, and multi-trace correlation engine..."):
                     contents = [(uf.name, uf.read().decode("utf-8", errors="replace")) for uf in uploaded_files]
-                    ws = pipeline_service.ingest_trace_contents(contents)
+
+                    # Construct metadata overrides if engineer specified any non-default values
+                    meta_overrides = {}
+                    if opt_dev_type != "Auto Detect":
+                        meta_overrides["device_type"] = opt_dev_type
+                    if opt_trace_type != "Auto Detect":
+                        meta_overrides["trace_type"] = opt_trace_type
+                    if opt_dev_ip.strip():
+                        meta_overrides["device_ip"] = opt_dev_ip.strip()
+                    if opt_dev_name.strip():
+                        meta_overrides["device_name"] = opt_dev_name.strip()
+                    if opt_region.strip():
+                        meta_overrides["region"] = opt_region.strip()
+                    if opt_tz != "Auto Detect":
+                        meta_overrides["timezone"] = opt_tz
+
+                    ws = pipeline_service.ingest_trace_contents(contents, metadata_overrides=meta_overrides if meta_overrides else None)
                     st.session_state["analysis_workspace"] = ws
                     st.session_state["parsed_events"] = ws.events
                     st.session_state["correlated_sessions"] = ws.call_sessions
@@ -606,8 +670,36 @@ def main():
             else:
                 st.warning("Please select at least one file or use 'Load Bundled Samples' in the sidebar.")
 
+        if "analysis_workspace" in st.session_state and st.session_state["analysis_workspace"]:
+            cur_ws: AnalysisWorkspace = st.session_state["analysis_workspace"]
+            if cur_ws.trace_artifacts:
+                st.markdown("---")
+                st.markdown("### 📋 Trace Inventory (Content-Based Classification)")
+                inv_table_data = []
+                for a in cur_ws.trace_artifacts:
+                    evidence_str = ", ".join(a.get("classification_evidence", [])[:2]) if a.get("classification_evidence") else "Content pattern match"
+                    inv_table_data.append({
+                        "File": a.get("filename"),
+                        "Detected Type": a.get("trace_type"),
+                        "Device": a.get("device_type"),
+                        "IP": a.get("device_ip") or "-",
+                        "Confidence": f"{int(a.get('classification_confidence', 1.0) * 100)}%",
+                        "Status": "Classified",
+                        "Evidence": evidence_str,
+                    })
+                st.dataframe(pd.DataFrame(inv_table_data), use_container_width=True, hide_index=True)
+
+                p_stats = cur_ws.parser_statistics or {}
+                c_col1, c_col2, c_col3 = st.columns(3)
+                with c_col1:
+                    st.metric("Correlated Calls", p_stats.get("correlated_calls", len(cur_ws.call_sessions)))
+                with c_col2:
+                    st.metric("Uncorrelated Events", p_stats.get("uncorrelated_events", 0))
+                with c_col3:
+                    st.metric("Potentially Ambiguous", p_stats.get("potentially_ambiguous", 0))
+
         if "uploaded_file_names" in st.session_state:
-            st.markdown("#### Currently Active Files:")
+            st.markdown("#### Currently Ingested Files:")
             for fname in st.session_state["uploaded_file_names"]:
                 st.markdown(f"- 📄 `{fname}`")
 
@@ -863,8 +955,9 @@ def main():
                     st.markdown(f"**Evidence Count:** `{len(selected_session.correlation_evidence)}`")
 
                 # Drill-Down Sub-Tabs
-                s_tab_timeline, s_tab_protocols, s_tab_evidence, s_tab_anomalies, s_tab_pack = st.tabs(
+                s_tab_ladder, s_tab_timeline, s_tab_protocols, s_tab_evidence, s_tab_anomalies, s_tab_pack = st.tabs(
                     [
+                        "📈 Call Lifecycle Ladder",
                         "⏱️ Unified Call Timeline",
                         "📊 Protocols",
                         "🔗 Correlation Evidence",
@@ -872,6 +965,12 @@ def main():
                         "📦 JSON Evidence Pack",
                     ]
                 )
+
+                with s_tab_ladder:
+                    st.markdown("##### 📈 Dynamic Call Lifecycle Ladder Diagram")
+                    st.caption("PSTN ↔ Voice Gateway ↔ CUCM ↔ Phone (CUCM SDL is an internal call-processing leg)")
+                    ladder_diagram = CallLifecycleLadder().generate_ascii_ladder(selected_session)
+                    st.code(ladder_diagram, language="text")
 
                 with s_tab_timeline:
                     s_events = [ev.to_summary_dict() for ev in selected_session.events]
@@ -1157,8 +1256,8 @@ def main():
             st.markdown("### 🧠 VoiceOps Deep Engineering Analysis")
             st.caption("Comprehensive, evidence-grounded forensic investigation across ISDN Q.931, MGCP, CUCM SDL, and SIP signaling.")
 
-            # Section 17 Overview: ANALYSIS SUMMARY
-            st.markdown("#### 📋 Analysis Summary")
+            # Section Overview: ANALYSIS SUMMARY
+            st.markdown("#### 📋 Trace Summary")
             sum_col1, sum_col2, sum_col3, sum_col4 = st.columns(4)
             with sum_col1:
                 st.markdown(f"**Trace Files:** `{len(workspace.source_files) if workspace else 1}`")
@@ -1173,35 +1272,248 @@ def main():
                 st.markdown(f"**CUCM SDL Events:** `{sdl_ev_count:,}`")
                 total_anoms = len(workspace.anomalies) if workspace else sum(len(s.anomalies) for s in sessions)
                 st.markdown(f"**Anomalies:** `{total_anoms}`")
-                time_range = f"{workspace.timestamps.get('start_time', '')[:19].replace('T', ' ')} to {workspace.timestamps.get('end_time', '')[:19].replace('T', ' ')}" if workspace and workspace.timestamps.get('start_time') else "N/A"
-                st.markdown(f"**Time Range:** `{time_range}`")
+                trace_tr = workspace.time_range_ist if (workspace and workspace.time_range_ist) else "N/A"
+                st.markdown(f"**Trace Time Range (IST):**  \n`{trace_tr}`")
             with sum_col4:
                 arch_name = workspace.architecture if workspace else "UNKNOWN"
                 st.markdown(f"**Detected Architecture:**  \n`{arch_name}`")
 
+            # Section 17 Diagnostics Expander: Parser Statistics
+            parser_stats = (workspace.parser_statistics if workspace and workspace.parser_statistics else {})
+            if parser_stats:
+                with st.expander("📊 Parser & Correlation Diagnostics", expanded=False):
+                    diag_c1, diag_c2, diag_c3 = st.columns(3)
+                    with diag_c1:
+                        st.markdown(f"**Raw Lines:** `{parser_stats.get('raw_lines', 0):,}`")
+                        st.markdown(f"**Parsed SDL Events:** `{parser_stats.get('parsed_sdl_events', 0):,}`")
+                        st.markdown(f"**Total Events:** `{parser_stats.get('total_events', 0):,}`")
+                    with diag_c2:
+                        st.markdown(f"**ISDN Events:** `{parser_stats.get('isdn_events', 0):,}`")
+                        st.markdown(f"**MGCP Events:** `{parser_stats.get('mgcp_events', 0):,}`")
+                        st.markdown(f"**SIP Events:** `{parser_stats.get('sip_events', 0):,}`")
+                        st.markdown(f"**CUCM Events:** `{parser_stats.get('cucm_events', 0):,}`")
+                    with diag_c3:
+                        st.markdown(f"**Correlated Calls:** `{parser_stats.get('correlated_calls', 0):,}`")
+                        st.markdown(f"**Events Assigned to Calls:** `{parser_stats.get('events_assigned_to_calls', 0):,}`")
+                        st.markdown(f"**Events Not Assigned:** `{parser_stats.get('events_not_assigned', 0):,}`")
+                        st.markdown(f"**Uncorrelated Events:** `{parser_stats.get('uncorrelated_events', 0):,}`")
+
             st.markdown("---")
 
-            # Agent Analysis Controls
+            # =================================================================
+            # 1. CALL SELECTION SECTION (Requirements 1, 2)
+            # =================================================================
+            st.markdown("### 🔍 Call Selection")
+            st.caption("A single trace file may contain many calls. Filter and select a specific call session to isolate its signaling sequence and surrounding CUCM SDL activity.")
+
+            # Search/Filter Inputs
+            f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns([2, 2, 2, 2, 1.5])
+            with f_col1:
+                search_calling = st.text_input("Calling Number", key="filter_calling_num", placeholder="e.g. 9876543210")
+            with f_col2:
+                search_called = st.text_input("Called Number", key="filter_called_num", placeholder="e.g. 1800123456")
+            with f_col3:
+                search_start = st.text_input("Start Time", key="filter_start_time", placeholder="e.g. 15:20 or 20-Sep")
+            with f_col4:
+                search_end = st.text_input("End Time", key="filter_end_time", placeholder="e.g. 15:30")
+            with f_col5:
+                st.write("")
+                st.write("")
+                if st.button("Clear Filters", key="btn_clear_call_filters", use_container_width=True):
+                    st.session_state["filter_calling_num"] = ""
+                    st.session_state["filter_called_num"] = ""
+                    st.session_state["filter_start_time"] = ""
+                    st.session_state["filter_end_time"] = ""
+                    st.rerun()
+
+            # Filter calls
+            filtered_sessions = sessions
+            if search_calling:
+                filtered_sessions = [s for s in filtered_sessions if search_calling.lower() in (s.calling_number or "").lower()]
+            if search_called:
+                filtered_sessions = [s for s in filtered_sessions if search_called.lower() in (s.called_number or "").lower()]
+            if search_start:
+                filtered_sessions = [
+                    s for s in filtered_sessions
+                    if search_start.lower() in (s.start_time_ist or "").lower()
+                    or (s.start_time and search_start.lower() in s.start_time.isoformat().lower())
+                ]
+            if search_end:
+                filtered_sessions = [
+                    s for s in filtered_sessions
+                    if search_end.lower() in (s.end_time_ist or "").lower()
+                    or (s.end_time and search_end.lower() in s.end_time.isoformat().lower())
+                ]
+
+            st.markdown(f"**Calls detected:** `{len(filtered_sessions)}` *(Total correlated in trace: {len(sessions)})*")
+
+            selected_session: Optional[CallSession] = None
+            if not filtered_sessions:
+                st.warning("No calls match the current search filters. Click 'Clear Filters' above to reset.")
+            else:
+                # Build summary rows for calls table
+                call_table_rows = []
+                for s in filtered_sessions:
+                    proto_map = s.protocol_counts
+                    call_table_rows.append({
+                        "Call ID": s.session_id,
+                        "Calling Number": s.calling_number or "Unknown",
+                        "Called Number": s.called_number or "Unknown",
+                        "Call Start Time (IST)": s.start_time_ist,
+                        "Call End Time (IST)": s.end_time_ist,
+                        "Duration": s.duration_display,
+                        "Architecture": s.architecture.value,
+                        "ISDN": proto_map.get("ISDN", 0),
+                        "MGCP": proto_map.get("MGCP", 0),
+                        "SIP": proto_map.get("SIP", 0),
+                        "CUCM SDL": proto_map.get("CUCM", 0),
+                        "Anomalies": len(s.anomalies),
+                        "Status": s.status,
+                    })
+
+                st.dataframe(
+                    pd.DataFrame(call_table_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # Call Selector Dropdown
+                call_options = [s.session_id for s in filtered_sessions]
+                curr_selected = st.session_state.get("selected_analysis_call_id")
+                default_idx = call_options.index(curr_selected) if curr_selected in call_options else 0
+
+                selected_call_id = st.selectbox(
+                    "🎯 Choose Call Session for Investigation:",
+                    call_options,
+                    index=default_idx,
+                    format_func=lambda cid: next(
+                        (f"{s.session_id} | Calling: {s.calling_number or 'Unknown'} ➔ Called: {s.called_number or 'Unknown'} | Start: {s.start_time_ist} | {s.architecture.value}" for s in filtered_sessions if s.session_id == cid),
+                        cid,
+                    ),
+                    key="select_call_dropdown",
+                )
+                st.session_state["selected_analysis_call_id"] = selected_call_id
+                selected_session = next((s for s in filtered_sessions if s.session_id == selected_call_id), filtered_sessions[0])
+
+            st.markdown("---")
+
+            # =================================================================
+            # 2. SELECTED CALL SECTION (Requirements 8, 9, 10)
+            # =================================================================
+            sdl_window_secs = 5.0
+            if selected_session:
+                st.markdown(f"### 📞 Selected Call: `{selected_session.session_id}`")
+
+                sel_c1, sel_c2, sel_c3 = st.columns(3)
+                with sel_c1:
+                    st.markdown(f"**Calling Number:** `{selected_session.calling_number or 'Unknown'}`")
+                    st.markdown(f"**Called Number:** `{selected_session.called_number or 'Unknown'}`")
+                    st.markdown(f"**Duration:** `{selected_session.duration_display}`")
+                with sel_c2:
+                    raw_start = selected_session.start_time.strftime('%H:%M:%S.%f')[:-3] if selected_session.start_time else "N/A"
+                    raw_end = selected_session.end_time.strftime('%H:%M:%S.%f')[:-3] if selected_session.end_time else "N/A"
+                    st.markdown(f"**CUCM Trace Time:**  \n`{raw_start} → {raw_end}`")
+                    st.markdown(f"**IST Time:**  \n`{selected_session.start_time_ist} → {selected_session.end_time_ist}`")
+                with sel_c3:
+                    st.markdown(f"**Architecture:**  \n`{selected_session.architecture.value}`")
+                    st.markdown(f"**Confidence:** `{int(selected_session.correlation_confidence * 100)}%`")
+
+                # SDL Time Window Controls (Requirement 9)
+                w_col1, w_col2 = st.columns([2, 3])
+                with w_col1:
+                    window_option = st.selectbox(
+                        "SDL Analysis Window",
+                        ["±5 sec (Default)", "±1 sec", "±2 sec", "±10 sec", "±30 sec", "Custom"],
+                        index=0,
+                        key="sdl_window_select",
+                        help="Time window around call start and end to isolate CUCM SDL background processes and signals.",
+                    )
+                with w_col2:
+                    if window_option == "Custom":
+                        sdl_window_secs = st.number_input("Custom SDL Window (seconds)", min_value=0.0, max_value=300.0, value=5.0, step=1.0, key="sdl_custom_secs")
+                    else:
+                        window_mapping = {
+                            "±1 sec": 1.0,
+                            "±2 sec": 2.0,
+                            "±5 sec (Default)": 5.0,
+                            "±10 sec": 10.0,
+                            "±30 sec": 30.0,
+                        }
+                        sdl_window_secs = window_mapping.get(window_option, 5.0)
+
+                # Selected Call Evidence Breakdown (Requirement 10)
+                st.markdown("#### Selected Call Evidence")
+                ev_c1, ev_c2, ev_c3, ev_c4, ev_c5 = st.columns(5)
+                p_counts = selected_session.protocol_counts
+                with ev_c1:
+                    st.metric("ISDN Events", p_counts.get("ISDN", 0))
+                with ev_c2:
+                    st.metric("MGCP Events", p_counts.get("MGCP", 0))
+                with ev_c3:
+                    st.metric("SIP Messages", p_counts.get("SIP", 0))
+                with ev_c4:
+                    st.metric("CUCM SDL Events", p_counts.get("CUCM", 0))
+                with ev_c5:
+                    st.metric("Anomalies", len(selected_session.anomalies))
+
+                # Deep SDL Evidence Table Expander (Requirement 10)
+                with st.expander("🔬 View SDL Evidence", expanded=False):
+                    if not workspace:
+                        ws_base = AnalysisWorkspace(
+                            events=events,
+                            call_sessions=sessions,
+                            source_files=st.session_state.get("uploaded_file_names", ["trace.txt"]),
+                        )
+                    else:
+                        ws_base = workspace
+
+                    call_scoped_ws = ws_base.create_call_scoped_workspace(selected_session, time_window_seconds=sdl_window_secs)
+                    default_fn = ws_base.source_files[0] if ws_base.source_files else "cucm_trace.txt"
+                    sdl_obs_list = extract_sdl_observations(call_scoped_ws.events, default_filename=default_fn)
+
+                    if not sdl_obs_list:
+                        st.info("No specific CUCM SDL process signals isolated within the selected time window.")
+                    else:
+                        st.caption(f"Showing {len(sdl_obs_list)} SDL observation(s) within ±{sdl_window_secs}s of call boundaries:")
+                        sdl_rows = [obs.to_display_dict() for obs in sdl_obs_list]
+                        st.dataframe(pd.DataFrame(sdl_rows), use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+
+            # =================================================================
+            # 3. AGENT ANALYSIS CONTROLS (Requirements 13, 15)
+            # =================================================================
+            st.markdown("### 🤖 Agent Analysis")
             act_col1, act_col2, act_col3 = st.columns([2, 1.5, 2])
             has_existing_analysis = "agent_analysis_result" in st.session_state and st.session_state["agent_analysis_result"] is not None
             run_btn_label = "🔄 Re-run Agent Analysis" if has_existing_analysis else "🚀 Run Agent Analysis"
 
             with act_col1:
                 if st.button(run_btn_label, type="primary", key="btn_run_agent_analysis", use_container_width=True):
-                    if not workspace:
-                        ws_to_analyze = AnalysisWorkspace(
-                            events=events,
-                            call_sessions=sessions,
-                            source_files=st.session_state.get("uploaded_file_names", ["trace.txt"]),
-                            protocol_counts={"ISDN": isdn_count, "SIP": sip_count, "MGCP": mgcp_count},
-                        )
+                    if not selected_session:
+                        st.warning("Please select a call before running Agent Analysis.")
                     else:
-                        ws_to_analyze = workspace
-                    with st.spinner("Executing deep forensic engineering analysis across CUCM SDL, ISDN, MGCP, and SIP traces..."):
-                        analysis_result = agent_analyzer.analyze(ws_to_analyze)
-                        st.session_state["agent_analysis_result"] = analysis_result
-                    st.success(f"Engineering Analysis completed! (ID: {analysis_result.analysis_id})")
-                    st.rerun()
+                        if not workspace:
+                            ws_base = AnalysisWorkspace(
+                                events=events,
+                                call_sessions=sessions,
+                                source_files=st.session_state.get("uploaded_file_names", ["trace.txt"]),
+                            )
+                        else:
+                            ws_base = workspace
+
+                        # Create Call-Scoped Workspace (Requirements 8, 15)
+                        call_scoped_ws = ws_base.create_call_scoped_workspace(selected_session, time_window_seconds=sdl_window_secs)
+
+                        if not call_scoped_ws.events:
+                            st.warning("Insufficient evidence for deep RCA. Trace contains no signaling events for the selected call window.")
+                        else:
+                            with st.spinner(f"Analyzing call {selected_session.session_id} ({selected_session.calling_number}->{selected_session.called_number}) across SDL window (±{sdl_window_secs}s)..."):
+                                analysis_result = agent_analyzer.analyze(call_scoped_ws)
+                                st.session_state["agent_analysis_result"] = analysis_result
+                                st.session_state["agent_analyzed_call_id"] = selected_session.session_id
+                            st.success(f"Engineering Analysis completed for Call {selected_session.session_id}! (ID: {analysis_result.analysis_id})")
+                            st.rerun()
 
             with act_col2:
                 if st.button("🔄 Refresh Analysis", key="btn_refresh_analysis", use_container_width=True):
@@ -1225,14 +1537,31 @@ def main():
                         use_container_width=True,
                     )
 
-            # Render 8-Section Engineering Report
+            # =================================================================
+            # 4. RENDER DEEP ENGINEERING REPORT (Requirement 14)
+            # =================================================================
             current_analysis = st.session_state.get("agent_analysis_result")
             if not current_analysis:
-                st.info("💡 Click **Run Agent Analysis** above to initiate deep reasoning and forensic analysis of the trace.")
+                st.info("💡 Select a call above and click **Run Agent Analysis** to initiate deep reasoning and forensic analysis.")
             else:
                 st.markdown("---")
-                st.markdown(f"## 📑 Engineering Analysis Report (`{current_analysis.analysis_id}`)")
+                st.markdown(f"## 📑 Deep Engineering Analysis Report (`{current_analysis.analysis_id}`)")
                 st.caption(f"Generated at {current_analysis.created_at[:19].replace('T', ' ')} UTC | Engine: `{current_analysis.model_provider}` v`{current_analysis.analysis_version}`")
+
+                # Section 0: Call Summary (Requirement 14)
+                with st.expander("📋 Call Summary", expanded=True):
+                    c_sum1, c_sum2, c_sum3 = st.columns(3)
+                    with c_sum1:
+                        st.markdown(f"**Call ID:** `{current_analysis.call_id or 'N/A'}`")
+                        st.markdown(f"**Calling Number:** `{current_analysis.calling_number or 'Unknown'}`")
+                        st.markdown(f"**Called Number:** `{current_analysis.called_number or 'Unknown'}`")
+                    with c_sum2:
+                        st.markdown(f"**Start Time (IST):** `{current_analysis.start_time_ist or 'N/A'}`")
+                        st.markdown(f"**End Time (IST):** `{current_analysis.end_time_ist or 'N/A'}`")
+                        st.markdown(f"**Duration:** `{current_analysis.duration or 'N/A'}`")
+                    with c_sum3:
+                        st.markdown(f"**Architecture:** `{current_analysis.architecture_name}`")
+                        st.markdown(f"**Confidence:** `{current_analysis.architecture_confidence}`")
 
                 # Section 1: Executive Summary
                 with st.expander("1️⃣ Executive Summary", expanded=True):
@@ -1247,10 +1576,10 @@ def main():
                         st.markdown(f"- {ev_bullet}")
                     st.markdown(f"**Confidence:** `{current_analysis.architecture_confidence}`")
 
-                # Section 3: Call Flow
+                # Section 3: Call Flow Sequence
                 with st.expander("3️⃣ Chronological Call Flow Sequence", expanded=True):
                     if current_analysis.call_flow:
-                        st.code("\n".join(current_analysis.call_flow[:30]), language="text")
+                        st.code("\n".join(current_analysis.call_flow[:50]), language="text")
                     else:
                         st.text("No chronological progression parsed.")
 
@@ -1288,7 +1617,7 @@ def main():
                     if not current_analysis.sdl_analysis:
                         st.info("No specific CUCM SDL process signals isolated in trace.")
                     else:
-                        for idx, obs in enumerate(current_analysis.sdl_analysis[:20]):
+                        for idx, obs in enumerate(current_analysis.sdl_analysis[:25]):
                             st.markdown(
                                 f"""
                                 <div style="background:#1E293B; border-left:3px solid #38BDF8; padding:0.6rem 0.8rem; margin-bottom:0.6rem; border-radius:4px;">
@@ -1348,23 +1677,30 @@ def main():
                             st.markdown(f"{idx}. {ev_item}")
                         st.markdown(f"**Confidence:** `{rc.confidence}`")
                     else:
-                        st.warning("⚠️ **Insufficient evidence to establish root cause.**")
+                        st.warning("⚠️ **Root cause not established from available evidence.**")
                         if rc.missing_evidence:
                             st.markdown(f"**Missing Evidence Required:**\n{rc.missing_evidence}")
 
                     st.markdown("---")
                     st.markdown("#### 🧠 Engineering Reasoning Matrix")
-                    mat_col1, mat_col2, mat_col3 = st.columns(3)
+                    mat_col1, mat_col2, mat_col3, mat_col4 = st.columns(4)
                     with mat_col1:
-                        st.markdown("##### 📌 FACTS (Directly Observed)")
+                        st.markdown("##### 📌 FACTS (Observed)")
                         for f in rc.facts:
                             st.markdown(f"- {f}")
                     with mat_col2:
-                        st.markdown("##### 💡 INFERENCES (Protocol Deductions)")
+                        st.markdown("##### 🔗 CORRELATIONS")
+                        if rc.correlations:
+                            for c in rc.correlations:
+                                st.markdown(f"- {c}")
+                        else:
+                            st.caption("None active")
+                    with mat_col3:
+                        st.markdown("##### 💡 INFERENCES")
                         for inf in rc.inferences:
                             st.markdown(f"- {inf}")
-                    with mat_col3:
-                        st.markdown("##### 🔬 HYPOTHESES (Requiring Validation)")
+                    with mat_col4:
+                        st.markdown("##### 🔬 HYPOTHESES")
                         if rc.hypotheses:
                             for h in rc.hypotheses:
                                 st.markdown(f"- {h}")
@@ -1372,7 +1708,16 @@ def main():
                             st.caption("None active")
 
     # =========================================================================
-    # TAB 8: Architecture & RCA
+    # TAB 8: Dedicated CUCM SDL Trace Analysis
+    # =========================================================================
+    with tab_sdl_analysis:
+        render_sdl_analysis_tab(
+            artifact_repo=artifact_repo,
+            cucm_client=get_cucm_client(),
+        )
+
+    # =========================================================================
+    # TAB 9: Architecture & RCA
     # =========================================================================
     with tab_architecture:
         if not events:

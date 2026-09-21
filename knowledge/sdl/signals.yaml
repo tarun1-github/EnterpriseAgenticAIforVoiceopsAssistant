@@ -1,0 +1,104 @@
+version: "1.0.0"
+category: "sdl_signals"
+source: "Cisco CUCM Troubleshooting Guide & SDL Trace Specification"
+
+signals:
+  - name: CcSetupReq
+    category: call_control
+    description: Internal CUCM Call Control setup request signaling the initiation of an outbound or routed call leg.
+    related_processes:
+      - Cdcc
+      - SIPCdpc
+      - RouteListControl
+    expected_context: route_selection, device_selection
+    possible_failure_domains:
+      - call_control
+      - digit_analysis
+      - route_list_exhaustion
+    confidence: high
+    source_reference: "Cisco CUCM CallManager SDL Architecture Reference Guide"
+
+  - name: CcSetupInd
+    category: call_control
+    description: Inbound call setup indication dispatched from signaling protocol handler (SIPCdpc/MGCPHandler) to Cdcc.
+    related_processes:
+      - Cdcc
+      - SIPHandler
+      - MGCPHandler
+    expected_context: call_arrival, digit_analysis
+    possible_failure_domains:
+      - css_partition_mismatch
+      - unallocated_number
+    confidence: high
+    source_reference: "Cisco Unified Communications Manager Call Processing Guide"
+
+  - name: CcAlertInd
+    category: call_control
+    description: Call alerting indication forwarded to originating call leg when remote party is ringing.
+    related_processes:
+      - Cdcc
+      - StationInit
+      - SIPCdpc
+    expected_context: alerting_phase
+    possible_failure_domains:
+      - media_negotiation_failure
+      - ringback_timeout
+    confidence: high
+    source_reference: "Cisco CUCM Signaling Fundamentals"
+
+  - name: CcConnectInd
+    category: call_control
+    description: Call connect indication indicating remote party answered; triggers media cut-through and billing.
+    related_processes:
+      - Cdcc
+      - StationInit
+      - SIPCdpc
+    expected_context: active_call
+    possible_failure_domains:
+      - early_offer_sdp_mismatch
+      - codec_negotiation
+    confidence: high
+    source_reference: "Cisco CUCM Call Processing Guide"
+
+  - name: CcDisconnectReq
+    category: call_control
+    description: Call disconnect request initiated by one of the call endpoints or CUCM policy.
+    related_processes:
+      - Cdcc
+      - StationInit
+      - SIPCdpc
+    expected_context: call_teardown
+    possible_failure_domains:
+      - user_hangup
+      - sip_timeout
+      - cause_code_q850
+    confidence: high
+    source_reference: "Cisco CUCM SDL Architecture"
+
+  - name: SIPPingReq
+    category: sip_options
+    description: Periodic SIP OPTIONS keepalive sent to configured SIP Trunks to monitor peer health.
+    related_processes:
+      - SIPHandler
+      - SIPD
+    expected_context: trunk_monitoring
+    possible_failure_domains:
+      - network_unreachable
+      - firewall_block
+      - sip_options_timeout
+    confidence: high
+    source_reference: "CUCM SIP Trunk Options Ping Guide"
+
+  - name: MGCPNotify
+    category: mgcp_signaling
+    description: MGCP event notification sent from gateway to CallManager (e.g. offhook, onhook, dialed digits).
+    related_processes:
+      - MGCPHandler
+      - MGCPInit
+      - MGCPManager
+    expected_context: gateway_interaction
+    possible_failure_domains:
+      - mgcp_endpoint_unregistered
+      - rtt_delay
+    confidence: high
+    source_reference: "RFC 3435 / Cisco MGCP Configuration Guide"

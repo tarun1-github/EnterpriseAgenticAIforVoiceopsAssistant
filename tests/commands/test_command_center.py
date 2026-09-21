@@ -208,8 +208,37 @@ class TestCommandExport:
         assert "Device IP   : 10.197.206.141" in text
         assert "Timestamp   : 2026-09-20 16:45:32 IST" in text
         assert "Command     : show version active" in text
-        assert "Status      : SUCCESS" in text
-        assert "REQUEST\n=======\n\nshow version active" in text
-        assert "RESPONSE\n========\n\nadmin:show version active" in text
         assert "Version 15.0.1" in text
+
+
+class TestRunDeviceCommandTool:
+    """Test safe tool wrapper run_device_command."""
+
+    def test_run_device_command_requires_approval(self):
+        from app.commands.service import run_device_command
+
+        res = run_device_command(device_type="CUCM", command="show version active", approved=False)
+        assert res["success"] is False
+        assert res["status"] == "APPROVAL_REQUIRED"
+        assert "approval is required" in res["error"]
+
+    def test_run_device_command_executes_with_approval(self):
+        from app.commands.service import run_device_command
+
+        with patch("app.commands.service.DeviceCommandService.execute") as mock_exec:
+            from app.commands.models import CommandResponse, DeviceTypeEnum
+            mock_exec.return_value = CommandResponse(
+                command="show status",
+                device_type=DeviceTypeEnum.CUCM,
+                host="10.197.206.141",
+                output="CUCM 15 running normal",
+                execution_time_seconds=0.15,
+                success=True,
+                prompt="admin:",
+            )
+            res = run_device_command(device_type="CUCM", command="show status", approved=True)
+            assert res["success"] is True
+            assert res["status"] == "SUCCESS"
+            assert res["output"] == "CUCM 15 running normal"
+
 

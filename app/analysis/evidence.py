@@ -8,16 +8,44 @@ from pydantic import BaseModel, Field
 from app.models.event import VoiceEvent, ProtocolEnum
 
 
+from app.core.timestamps import to_ist_display
+
+
 class SDLObservation(BaseModel):
     """Correlated CUCM SDL observation with exact forensic lineage."""
 
     timestamp: Optional[str] = Field(None, description="Event timestamp (e.g. 08:52:35.085)")
+    timestamp_ist: Optional[str] = Field(None, description="Event timestamp formatted in Asia/Kolkata timezone")
     filename: str = Field(..., description="Source trace file name")
     event_name: str = Field(..., description="SDL message or signal name")
+    signal: Optional[str] = Field(None, description="Specific SDL Signal name")
     process_name: Optional[str] = Field(None, description="CUCM process (e.g. MGCPHandler, SIPD, StationInit)")
+    sending_process: Optional[str] = Field(None, description="SDL sending process")
+    receiving_process: Optional[str] = Field(None, description="SDL receiving process")
+    correlation_tag: Optional[str] = Field(None, description="Correlation tag (AppCorr, CI, ccbID)")
+    trace_type: Optional[str] = Field(None, description="SDL trace type (SdlSig, AppInfo, etc.)")
+    app_name: Optional[str] = Field(None, description="Application name (e.g. CCM)")
+    device: Optional[str] = Field(None, description="Involved device name")
+    peer_ip: Optional[str] = Field(None, description="Involved peer IP address")
     related_call_id: Optional[str] = Field(None, description="Related Call ID or Transaction ID")
     interpretation: str = Field(..., description="Engineering interpretation of the SDL signal")
     raw_evidence: str = Field(..., description="Raw trace line excerpt")
+
+    def to_display_dict(self) -> Dict[str, Any]:
+        """Convert observation to dictionary matching Requirement 10 for UI table."""
+        return {
+            "Timestamp": self.timestamp or "N/A",
+            "IST Timestamp": self.timestamp_ist or "N/A",
+            "Correlation Tag": self.correlation_tag or "N/A",
+            "Sending Process": self.sending_process or self.process_name or "N/A",
+            "Receiving Process": self.receiving_process or "N/A",
+            "Signal": self.signal or self.event_name,
+            "Trace Type": self.trace_type or "SdlSig",
+            "Application Name": self.app_name or "CCM",
+            "Device": self.device or "N/A",
+            "IP": self.peer_ip or "N/A",
+            "Raw SDL Line": self.raw_evidence,
+        }
 
 
 class TimingDelta(BaseModel):
@@ -92,8 +120,16 @@ def extract_sdl_observations(
 
     for ev in events:
         raw = ev.raw or ""
-        ts_str = ev.timestamp.strftime("%H:%M:%S.%f")[:-3] if ev.timestamp else "N/A"
+        ts_str = ev.timestamp.strftime("%H:%M:%S.%f")[:-3] if ev.timestamp else (ev.timestamp_raw or "N/A")
+        ts_ist = to_ist_display(ev.timestamp) if ev.timestamp else "N/A"
         fname = (ev.metadata.get("source_file") if ev.metadata else None) or default_filename
+        meta = ev.metadata or {}
+        corr_tag = meta.get("correlation_tag") or meta.get("call_id_ci") or meta.get("ccb_id")
+        send_p = meta.get("sending_process") or meta.get("cucm_process")
+        recv_p = meta.get("receiving_process")
+        t_type = meta.get("trace_type") or "SdlSig"
+        dev = ev.device
+        pip = ev.source_ip or ev.destination_ip or meta.get("peer_ip")
 
         # Detect SDL patterns in raw event
         # Pattern 1: MGCPHandler / MGCPManager
@@ -112,9 +148,18 @@ def extract_sdl_observations(
                 observations.append(
                     SDLObservation(
                         timestamp=ts_str,
+                        timestamp_ist=ts_ist,
                         filename=fname,
                         event_name=sig_name,
+                        signal=sig_name,
                         process_name="MGCPManager/MGCPHandler",
+                        sending_process=send_p or "MGCPHandler",
+                        receiving_process=recv_p or "MGCPManager",
+                        correlation_tag=corr_tag,
+                        trace_type=t_type,
+                        app_name="CCM",
+                        device=dev,
+                        peer_ip=pip,
                         related_call_id=ev.call_id or ev.transaction_id,
                         interpretation=interp,
                         raw_evidence=raw.strip()[:300],
@@ -124,15 +169,25 @@ def extract_sdl_observations(
         # Pattern 2: SIPD (SIP Dialog & Station processing)
         elif "SIPD" in raw or "SIPStationInit" in raw or "SIPNonceTimer" in raw:
             interp = "CUCM SIP stack managing SIP dialog session state and endpoint registration."
+            sig_name = ev.message_type or "SIPDialogEvent"
             obs_key = (ts_str, "SIPD", raw[:40])
             if obs_key not in seen_keys:
                 seen_keys.add(obs_key)
                 observations.append(
                     SDLObservation(
                         timestamp=ts_str,
+                        timestamp_ist=ts_ist,
                         filename=fname,
-                        event_name=ev.message_type or "SIPDialogEvent",
+                        event_name=sig_name,
+                        signal=sig_name,
                         process_name="SIPD",
+                        sending_process=send_p or "SIPHandler",
+                        receiving_process=recv_p or "SIPD",
+                        correlation_tag=corr_tag,
+                        trace_type=t_type,
+                        app_name="CCM",
+                        device=dev,
+                        peer_ip=pip,
                         related_call_id=ev.call_id,
                         interpretation=interp,
                         raw_evidence=raw.strip()[:300],
@@ -147,9 +202,18 @@ def extract_sdl_observations(
                 observations.append(
                     SDLObservation(
                         timestamp=ts_str,
+                        timestamp_ist=ts_ist,
                         filename=fname,
                         event_name="DeviceEventReceiptMonitoringTimer",
+                        signal="DeviceEventReceiptMonitoringTimer",
                         process_name="StationInit",
+                        sending_process=send_p or "StationInit",
+                        receiving_process=recv_p or "SdlTimerService",
+                        correlation_tag=corr_tag,
+                        trace_type=t_type,
+                        app_name="CCM",
+                        device=dev,
+                        peer_ip=pip,
                         related_call_id=None,
                         interpretation="CUCM monitoring endpoint keepalive and receipt of device events.",
                         raw_evidence=raw.strip()[:300],
@@ -157,9 +221,9 @@ def extract_sdl_observations(
                 )
 
         # Pattern 4: Generic SdlSig
-        elif "SdlSig" in raw:
+        elif "SdlSig" in raw or meta.get("trace_type") == "SdlSig":
             parts = [p.strip() for p in raw.split("|") if p.strip()]
-            sig_name = parts[3] if len(parts) > 3 else "SdlSignal"
+            sig_name = parts[3] if len(parts) > 3 else (ev.message_type or "SdlSignal")
             state_name = parts[4] if len(parts) > 4 else ""
             proc_from = parts[5] if len(parts) > 5 else ""
 
@@ -170,10 +234,19 @@ def extract_sdl_observations(
                 observations.append(
                     SDLObservation(
                         timestamp=ts_str,
+                        timestamp_ist=ts_ist,
                         filename=fname,
                         event_name=sig_name,
+                        signal=sig_name,
                         process_name=proc_from or "SdlService",
-                        related_call_id=ev.call_id,
+                        sending_process=send_p or proc_from or "SdlService",
+                        receiving_process=recv_p or "CCM",
+                        correlation_tag=corr_tag,
+                        trace_type=t_type,
+                        app_name="CCM",
+                        device=dev,
+                        peer_ip=pip,
+                        related_call_id=ev.call_id or meta.get("call_id_ci"),
                         interpretation=interp,
                         raw_evidence=raw.strip()[:300],
                     )

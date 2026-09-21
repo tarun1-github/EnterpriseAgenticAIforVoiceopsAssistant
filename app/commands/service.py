@@ -1,7 +1,7 @@
 """Service for executing commands on CUCM and Cisco IOS gateways with safety guardrails."""
 
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 from app.commands.models import CommandRequest, CommandResponse, CommandHistoryEntry, DeviceTypeEnum
 from app.commands.safety import validate_command_safety, mask_secrets
 from app.commands.history import CommandHistoryManager
@@ -146,3 +146,71 @@ class DeviceCommandService:
                 success=False,
                 error=error_msg,
             )
+
+
+def run_device_command(
+    device_type: str,
+    command: str,
+    approved: bool = False,
+    host: Optional[str] = None,
+    timeout: float = 30.0,
+    max_output_bytes: int = 65536,
+) -> Dict[str, Any]:
+    """Safe tool interface for executing diagnostic device commands.
+
+    Command execution is gated by explicit user approval (`approved=True`).
+    """
+    if not approved:
+        logger.warning("run_device_command rejected: approval=False for command '%s'", command)
+        return {
+            "success": False,
+            "status": "APPROVAL_REQUIRED",
+            "device_type": device_type,
+            "command": command,
+            "output": "",
+            "error": "Explicit user approval is required before device commands can be executed (approved=False).",
+        }
+
+    # Map device type
+    dev_str = device_type.strip().lower()
+    if "cucm" in dev_str:
+        dev_enum = DeviceTypeEnum.CUCM
+        default_host = get_settings().cucm_host
+    elif "ios" in dev_str or "router" in dev_str or "gateway" in dev_str:
+        dev_enum = DeviceTypeEnum.IOS
+        default_host = get_settings().gateway_host
+    else:
+        return {
+            "success": False,
+            "status": "INVALID_DEVICE",
+            "device_type": device_type,
+            "command": command,
+            "output": "",
+            "error": f"Unsupported device type: '{device_type}'. Must be CUCM or IOS.",
+        }
+
+    target_host = host or default_host
+    service = DeviceCommandService()
+    req = CommandRequest(
+        device_type=dev_enum,
+        command=command,
+        host=target_host,
+        timeout=timeout,
+    )
+    resp = service.execute(req)
+
+    output = resp.output or ""
+    if len(output.encode("utf-8")) > max_output_bytes:
+        output = output[:max_output_bytes] + "\n... [OUTPUT TRUNCATED DUE TO SIZE LIMIT]"
+
+    return {
+        "success": resp.success,
+        "status": "SUCCESS" if resp.success else "FAILED",
+        "device_type": resp.device_type.value,
+        "host": resp.host,
+        "command": resp.command,
+        "output": output,
+        "execution_time_seconds": resp.execution_time_seconds,
+        "error": resp.error,
+    }
+

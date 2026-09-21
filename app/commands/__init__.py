@@ -8,7 +8,7 @@ from app.commands.models import (
 )
 from app.commands.safety import validate_command_safety, mask_secrets
 from app.commands.history import CommandHistoryManager
-from app.commands.service import DeviceCommandService
+from app.commands.service import DeviceCommandService, run_device_command
 
 __all__ = [
     "CommandRequest",
@@ -19,4 +19,6 @@ __all__ = [
     "mask_secrets",
     "CommandHistoryManager",
     "DeviceCommandService",
+    "run_device_command",
 ]
+

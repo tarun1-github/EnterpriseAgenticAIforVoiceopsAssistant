@@ -36,12 +36,17 @@ MGCP_PATTERNS = [
 ]
 
 CUCM_PATTERNS = [
-    re.compile(r"\|StationInit:", re.IGNORECASE),
+    re.compile(r"\|StationInit", re.IGNORECASE),
     re.compile(r"\|CC\|", re.IGNORECASE),
     re.compile(r"Layer3NL::msgData", re.IGNORECASE),
     re.compile(r"Digit Analysis:", re.IGNORECASE),
     re.compile(r"StationD:", re.IGNORECASE),
     re.compile(r"SDL_Process", re.IGNORECASE),
+    re.compile(r"\|SdlSig\s*\|", re.IGNORECASE),
+    re.compile(r"\|AppInfo\s*\|", re.IGNORECASE),
+    re.compile(r"\|FileHead\s*\|", re.IGNORECASE),
+    re.compile(r"AppName:\s*CCM", re.IGNORECASE),
+    re.compile(r"AppId:\s*100", re.IGNORECASE),
 ]
 
 

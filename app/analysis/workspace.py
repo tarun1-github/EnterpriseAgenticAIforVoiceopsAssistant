@@ -1,22 +1,23 @@
 """AnalysisWorkspace model and pipeline service for unified cross-protocol troubleshooting."""
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 from pydantic import BaseModel, Field
 
-from app.models.event import VoiceEvent, ProtocolEnum
-from app.models.call_session import CallSession, CallArchitecture
-from app.models.anomaly import CallAnomaly
 from app.analysis.anomaly_detector import AnomalyDetector
-from app.analysis.evidence_builder import build_evidence_pack
 from app.analysis.architecture import detect_call_architecture, ArchitectureEvidence
-from app.correlation.engine import CorrelationEngine
-from app.parsers.ingestion import TraceIngestionEngine
+from app.analysis.evidence_builder import build_evidence_pack
 from app.artifacts.models import TraceManifest
 from app.core.config import get_settings
+from app.core.timestamps import format_time_range_ist, ensure_utc
+from app.correlation.engine import CorrelationEngine
+from app.models.anomaly import CallAnomaly
+from app.models.call_session import CallSession, CallArchitecture
+from app.models.event import VoiceEvent, ProtocolEnum
+from app.parsers.ingestion import TraceIngestionEngine
 from app.core.logging import get_logger
 
 logger = get_logger("analysis.workspace")
@@ -42,6 +43,12 @@ class AnalysisWorkspace(BaseModel):
         default_factory=dict,
         description="Event breakdown count by protocol",
     )
+    parser_statistics: Dict[str, int] = Field(
+        default_factory=dict,
+        description="Detailed diagnostic parser statistics",
+    )
+    time_range_ist: str = Field(default="N/A", description="Time range formatted in Asia/Kolkata timezone")
+    trace_artifacts: List[Dict[str, Any]] = Field(default_factory=list, description="Trace artifact inventory summaries")
     ingestion_status: str = Field(default="READY", description="Status of ingestion (READY, EMPTY, ERROR)")
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -58,6 +65,69 @@ class AnalysisWorkspace(BaseModel):
             if e.id == event_id:
                 return e
         return None
+
+    def create_call_scoped_workspace(
+        self,
+        call_session: CallSession,
+        time_window_seconds: float = 5.0,
+    ) -> "AnalysisWorkspace":
+        """Create a targeted AnalysisWorkspace containing only events and evidence for the selected call."""
+        session_event_ids = {e.id for e in call_session.events}
+
+        start_bound = None
+        end_bound = None
+        if call_session.start_time:
+            start_bound = call_session.start_time - timedelta(seconds=time_window_seconds)
+        if call_session.end_time:
+            end_bound = call_session.end_time + timedelta(seconds=time_window_seconds)
+
+        other_call_event_ids = {
+            ev.id for s in self.call_sessions if s.session_id != call_session.session_id for ev in s.events
+        }
+
+        scoped_events: List[VoiceEvent] = []
+        for e in self.events:
+            if e.id in session_event_ids:
+                scoped_events.append(e)
+            elif time_window_seconds and time_window_seconds > 0 and start_bound and end_bound and e.timestamp:
+                if e.id not in other_call_event_ids and start_bound <= e.timestamp <= end_bound:
+                    scoped_events.append(e)
+
+        scoped_events.sort(key=lambda ev: (ev.timestamp is None, ensure_utc(ev.timestamp) if ev.timestamp else None))
+
+        scoped_proto_counts: Dict[str, int] = {}
+        for ev in scoped_events:
+            p = ev.protocol.value if hasattr(ev.protocol, "value") else str(ev.protocol)
+            scoped_proto_counts[p] = scoped_proto_counts.get(p, 0) + 1
+
+        existing_anoms = list(call_session.anomalies)
+        for an in self.anomalies:
+            if an not in existing_anoms:
+                existing_anoms.append(an)
+        call_anomalies = existing_anoms
+        arch_ev = detect_call_architecture(scoped_events, sessions=[call_session])
+
+        return AnalysisWorkspace(
+            workspace_id=f"scoped_{call_session.session_id}",
+            trace_ids=self.trace_ids,
+            source_files=self.source_files,
+            events=scoped_events,
+            call_sessions=[call_session],
+            anomalies=call_anomalies,
+            evidence=list(call_session.correlation_evidence),
+            architecture=arch_ev.architecture_name,
+            architecture_evidence=arch_ev,
+            timestamps={
+                "start_time": call_session.start_time.isoformat() if call_session.start_time else None,
+                "end_time": call_session.end_time.isoformat() if call_session.end_time else None,
+            },
+            protocol_counts=scoped_proto_counts,
+            parser_statistics=self.parser_statistics,
+            time_range_ist=call_session.start_time_ist + " → " + call_session.end_time_ist if call_session.start_time else "N/A",
+            ingestion_status="READY",
+        )
+
+    create_scoped_workspace = create_call_scoped_workspace
 
 
 class AnalysisPipelineService:
@@ -83,12 +153,14 @@ class AnalysisPipelineService:
         self,
         contents: List[tuple[str, str]],
         trace_ids: Optional[List[str]] = None,
+        metadata_overrides: Optional[Dict[str, Any]] = None,
     ) -> AnalysisWorkspace:
         """Parse contents, correlate sessions, detect anomalies, and generate AnalysisWorkspace.
 
         Args:
             contents: List of (filename, text_content) tuples.
             trace_ids: Optional list of trace/request identifiers.
+            metadata_overrides: Optional user metadata overrides per file or global.
 
         Returns:
             Populated AnalysisWorkspace instance.
@@ -98,7 +170,19 @@ class AnalysisPipelineService:
 
         for filename, text in contents:
             source_files.append(filename)
-            events = self._ingestion_engine.ingest_content(text, source=filename)
+            # Find matching override if provided as dict of dicts or single dict
+            override = None
+            if metadata_overrides:
+                if filename in metadata_overrides:
+                    override = metadata_overrides[filename]
+                elif "device_type" in metadata_overrides or "trace_type" in metadata_overrides:
+                    override = metadata_overrides
+
+            events = self._ingestion_engine.ingest_content(
+                text,
+                source=filename,
+                metadata_override=override,
+            )
             all_events.extend(events)
 
         logger.info(
@@ -131,9 +215,37 @@ class AnalysisPipelineService:
         earliest_ts: Optional[str] = None
         latest_ts: Optional[str] = None
         valid_ts = [e.timestamp for e in all_events if e.timestamp]
+        earliest_dt = min(valid_ts) if valid_ts else None
+        latest_dt = max(valid_ts) if valid_ts else None
         if valid_ts:
-            earliest_ts = min(valid_ts).isoformat()
-            latest_ts = max(valid_ts).isoformat()
+            earliest_ts = earliest_dt.isoformat()
+            latest_ts = latest_dt.isoformat()
+        time_range_ist = format_time_range_ist(earliest_dt, latest_dt)
+
+        # Build Parser Statistics (Requirement 17)
+        raw_lines = sum(len(text.splitlines()) for _, text in contents)
+        parsed_sdl = sum(
+            1 for e in all_events
+            if e.protocol == ProtocolEnum.CUCM
+            or "SdlSig" in (e.metadata.get("trace_type") or "")
+            or "AppInfo" in (e.metadata.get("trace_type") or "")
+        )
+        assigned_events = sum(len(s.events) for s in call_sessions)
+        not_assigned = len(all_events) - assigned_events
+
+        parser_stats = {
+            "raw_lines": raw_lines,
+            "parsed_sdl_events": parsed_sdl,
+            "isdn_events": protocol_counts.get("ISDN", 0),
+            "mgcp_events": protocol_counts.get("MGCP", 0),
+            "sip_events": protocol_counts.get("SIP", 0),
+            "cucm_events": protocol_counts.get("CUCM", 0),
+            "total_events": len(all_events),
+            "correlated_calls": len(call_sessions),
+            "events_assigned_to_calls": assigned_events,
+            "events_not_assigned": not_assigned,
+            "uncorrelated_events": not_assigned,
+        }
 
         # Derive evidence-driven call architecture
         arch_evidence = detect_call_architecture(all_events, sessions=call_sessions)
@@ -150,6 +262,9 @@ class AnalysisPipelineService:
             architecture_evidence=arch_evidence,
             timestamps={"start_time": earliest_ts, "end_time": latest_ts},
             protocol_counts=protocol_counts,
+            parser_statistics=parser_stats,
+            time_range_ist=time_range_ist,
+            trace_artifacts=self._ingestion_engine.get_trace_inventory(),
             ingestion_status="READY" if all_events else "EMPTY",
         )
 

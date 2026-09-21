@@ -1,8 +1,11 @@
 """Core timestamp normalization utilities for Cisco voice traces."""
 
 import re
-from datetime import datetime
+from datetime import date, datetime, timezone
 from typing import Optional, Tuple
+from zoneinfo import ZoneInfo
+
+IST_TZ = ZoneInfo("Asia/Kolkata")
 
 # Regex patterns for Cisco timestamps
 # Pattern 1: ISO or full date (e.g. 2026-09-19 14:22:01.123 or 2026-09-19T14:22:01)
@@ -26,19 +29,35 @@ MONTH_MAP = {
 }
 
 
+def parse_date_from_file_head(content_or_line: str) -> Optional[date]:
+    """Extract explicit date declared in CUCM trace FileHead header.
+
+    Example line:
+    00602802.000 |08:52:24.482 |FileHead |UTC:+00:00,Date: 2026/09/20, AppName: CCM...
+    """
+    if not content_or_line:
+        return None
+    m = re.search(r"Date:\s*(?P<year>\d{4})[-/](?P<month>\d{2})[-/](?P<day>\d{2})", content_or_line, re.IGNORECASE)
+    if m:
+        return date(int(m.group("year")), int(m.group("month")), int(m.group("day")))
+    return None
+
+
 def parse_cisco_timestamp(
     raw_ts: Optional[str],
     reference_year: int = 2026,
+    reference_date: Optional[date] = None,
 ) -> Tuple[Optional[datetime], Optional[str]]:
     """Parse Cisco trace timestamp into a normalized datetime and clean raw string.
 
     Args:
         raw_ts: Raw timestamp string from trace header.
         reference_year: Reference year to apply when trace provides month and day only.
+        reference_date: Optional explicit date when trace lines contain time-only format.
 
     Returns:
         Tuple of (normalized_datetime_or_None, cleaned_raw_string).
-        If only time is provided without date, datetime is None ("do not invent date").
+        If only time is provided without date and reference_date is None, datetime is None.
     """
     if not raw_ts or not raw_ts.strip():
         return None, None
@@ -70,13 +89,55 @@ def parse_cisco_timestamp(
         second = int(m_md.group("second"))
         msec_str = m_md.group("msec") or "0"
         microsecond = int(msec_str.ljust(6, "0")[:6])
-        dt = datetime(reference_year, month, day, hour, minute, second, microsecond)
+        year = reference_date.year if reference_date else reference_year
+        dt = datetime(year, month, day, hour, minute, second, microsecond)
         return dt, clean_raw
 
     # Check Time-only format (e.g. 10:15:22.632)
-    # Requirement: Do not invent the date if it is unavailable.
     m_time = TIME_ONLY_PATTERN.match(clean_raw)
     if m_time:
+        if reference_date:
+            hour = int(m_time.group("hour"))
+            minute = int(m_time.group("minute"))
+            second = int(m_time.group("second"))
+            msec_str = m_time.group("msec") or "0"
+            microsecond = int(msec_str.ljust(6, "0")[:6])
+            dt = datetime(reference_date.year, reference_date.month, reference_date.day, hour, minute, second, microsecond)
+            return dt, clean_raw
         return None, clean_raw
 
     return None, clean_raw
+
+
+def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Convert any datetime to a canonical timezone-aware UTC datetime."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def to_ist_display(dt: Optional[datetime], fallback: str = "N/A") -> str:
+    """Convert canonical datetime to IST display string (e.g. '20-Sep-2026 15:42:31 IST').
+
+    Uses Asia/Kolkata timezone with proper offset calculations without manual string math.
+    """
+    if dt is None:
+        return fallback
+    if dt.tzinfo is None:
+        # Trace timestamps are recorded in UTC as defined in Cisco trace headers (UTC:+00:00)
+        dt_utc = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt_utc = dt.astimezone(timezone.utc)
+    dt_ist = dt_utc.astimezone(IST_TZ)
+    return dt_ist.strftime("%d-%b-%Y %H:%M:%S IST")
+
+
+def format_time_range_ist(start_dt: Optional[datetime], end_dt: Optional[datetime], fallback: str = "N/A") -> str:
+    """Format start and end datetimes into an IST range display."""
+    if not start_dt and not end_dt:
+        return fallback
+    start_str = to_ist_display(start_dt, fallback="N/A")
+    end_str = to_ist_display(end_dt, fallback="N/A")
+    return f"{start_str} → {end_str}"

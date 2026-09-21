@@ -153,7 +153,7 @@ class TestVoiceOpsAgentAnalyzer:
 
         # Markdown Report Formatting
         report = result.markdown_report
-        assert "# VoiceOps AI Analysis" in report
+        assert "# VoiceOps Deep Engineering Analysis" in report
         assert "## 1. Executive Summary" in report
         assert "## 2. Detected Architecture" in report
         assert "## 3. Call Flow" in report

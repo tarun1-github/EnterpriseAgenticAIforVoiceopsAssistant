@@ -1,0 +1,70 @@
+version: "1.0.0"
+category: "cucm_processes"
+source: "Cisco CUCM Architecture & Process Thread Model"
+
+processes:
+  - name: Cdcc
+    full_name: Call Deflection and Control Block
+    description: Core CUCM state machine coordinating leg pairing, digit routing, media negotiation, and call features.
+    instance_pattern: "Cdcc(1,100,20,*)"
+    primary_functions:
+      - Call state transitions
+      - Feature invocation (transfer, conference, hold)
+      - Signaling translation between legs
+    confidence: high
+    source_reference: "Cisco Press - Troubleshooting Cisco IP Telephony"
+
+  - name: SIPCdpc
+    full_name: SIP Call Device Process Control
+    description: Device-level process managing an individual SIP phone, trunk, or dialog session.
+    instance_pattern: "SIPCdpc(1,100,185,*)"
+    primary_functions:
+      - SIP dialog state machine
+      - SDP offer/answer handling
+      - SIP timers (Timer A, B, C, F, H)
+    confidence: high
+    source_reference: "Cisco CUCM SIP Architecture"
+
+  - name: SIPHandler
+    full_name: SIP Network Protocol Handler
+    description: Lower-layer network daemon listening on UDP/TCP/TLS port 5060/5061, parsing and encoding SIP messages.
+    instance_pattern: "SIPHandler(1,100,183,1)"
+    primary_functions:
+      - Transport layer receive and send
+      - TCP connection pooling
+      - Message deserialization
+    confidence: high
+    source_reference: "Cisco CUCM Protocol Engine Docs"
+
+  - name: MGCPHandler
+    full_name: MGCP Protocol Handler
+    description: Network handler listening on UDP 2427 for gateway notifications and sending transactions.
+    instance_pattern: "MGCPHandler(1,100,90,1)"
+    primary_functions:
+      - MGCP UDP message dispatching
+      - Transaction ID tracking
+      - Retransmission management
+    confidence: high
+    source_reference: "Cisco MGCP Implementation Guide"
+
+  - name: StationInit
+    full_name: Skinny / Station Initialization Process
+    description: Manages SCCP IP phones, device registration, keypad events, and display prompts.
+    instance_pattern: "StationInit(1,100,200,1)"
+    primary_functions:
+      - SCCP phone registration
+      - Line state management
+      - Keepalive monitoring
+    confidence: high
+    source_reference: "Cisco Press - Cisco CallManager Fundamentals"
+
+  - name: DigitAnalysis
+    full_name: CUCM Digit Analysis Engine
+    description: Evaluates dialed digits against CSS, Partitions, Translation Patterns, and Route Patterns.
+    instance_pattern: "DigitAnalysis(1,100,75,1)"
+    primary_functions:
+      - Pattern matching
+      - Translation and digit manipulation
+      - Route list selection
+    confidence: high
+    source_reference: "Cisco CUCM Dial Plan Architecture"

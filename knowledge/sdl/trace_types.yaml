@@ -1,0 +1,30 @@
+version: "1.0.0"
+category: "trace_record_types"
+source: "CUCM SDL File Format Specification"
+
+trace_types:
+  - type: FileHead
+    description: Initial file header record containing node hostname, software version, base date, and UTC offset.
+    importance: Mandatory for establishing base date and timezone offset.
+    confidence: high
+
+  - type: SdlSig
+    description: Structured inter-process or intra-process SDL signal transmission record.
+    fields:
+      - sequence_number
+      - timestamp
+      - signal_name
+      - process_state
+      - receiving_process
+      - sending_process
+      - process_ids
+      - parameters
+    confidence: high
+
+  - type: AppInfo
+    description: High-level application tracing record containing decoded protocol messages (SIP, MGCP, SCCP) or error descriptions.
+    confidence: high
+
+  - type: SdlStat
+    description: Diagnostic buffer and memory statistics emitted periodically by the SDL tracing subsystem.
+    confidence: high

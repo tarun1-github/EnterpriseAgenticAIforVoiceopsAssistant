@@ -1,0 +1,30 @@
+version: "1.0.0"
+category: "call_flows"
+protocol: "SIP"
+
+flows:
+  - name: "SIP Trunk / Station Outbound Call"
+    steps:
+      - step: 1
+        signal: "INVITE"
+        description: "UAC initiates call setup to CUCM or remote SIP destination."
+      - step: 2
+        signal: "100 Trying"
+        description: "Hop-by-hop acknowledgment that request is being processed."
+      - step: 3
+        signal: "180 Ringing"
+        description: "Far-end endpoint alerting indication (early media / local ringback)."
+      - step: 4
+        signal: "200 OK"
+        description: "Far-end answered; final response establishes active dialog."
+      - step: 5
+        signal: "ACK"
+        description: "Three-way handshake completed; bi-directional RTP media starts."
+      - step: 6
+        signal: "BYE"
+        description: "Call termination initiated by caller or callee."
+      - step: 7
+        signal: "200 OK"
+        description: "BYE acknowledged, dialog destroyed."
+    confidence: high
+    source_reference: "RFC 3261 Section 13 / Cisco Collaboration Architecture"

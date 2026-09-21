@@ -90,8 +90,41 @@ def extract_session_identifiers(events: List[VoiceEvent]) -> Dict[str, Any]:
         "sip_call_ids": sorted(list(sip_cids)),
         "devices": sorted(list(devices)),
         "endpoints": sorted(list(endpoints)),
-        "calling_number": calling_number,
-        "called_number": called_number,
+        "calling_number": calling_number or "Unknown",
+        "called_number": called_number or "Unknown",
         "start_time": start_time,
         "end_time": end_time,
     }
+
+
+def is_call_seed_candidate(event: VoiceEvent) -> bool:
+    """Determine whether an event is eligible to seed a new call session.
+
+    A session must have at least one explicit signaling identifier:
+    a calling/called number, a call_id, a call_reference, a transaction_id,
+    or a call establishment primitive (INVITE, SETUP, CRCX, StationInit).
+    Pure internal timer ticks, stats, and un-correlated logs without identifiers
+    must not spawn standalone 1-event CallSessions.
+    """
+    if (event.calling_number and event.calling_number != "Unknown") or (
+        event.called_number and event.called_number != "Unknown"
+    ):
+        return True
+
+    if event.call_id or event.call_reference or event.transaction_id:
+        return True
+
+    if event.metadata.get("call_id") or event.metadata.get("connection_id") or event.metadata.get("call_id_ci"):
+        return True
+
+    msg = (event.message_type or "").upper()
+    if event.protocol == ProtocolEnum.SIP and any(m in msg for m in ["INVITE", "180", "183", "200 OK", "BYE", "CANCEL"]):
+        return True
+    if event.protocol == ProtocolEnum.ISDN and any(m in msg for m in ["SETUP", "CALL_PROC", "ALERTING", "CONNECT", "DISCONNECT", "RELEASE"]):
+        return True
+    if event.protocol == ProtocolEnum.MGCP and any(m in msg for m in ["CRCX", "MDCX", "DLCX", "RQNT"]):
+        return True
+    if event.protocol == ProtocolEnum.CUCM and any(sig in msg for sig in ["StationInit", "StationD", "CcSetup", "DigitAnalysis", "CallState"]):
+        return True
+
+    return False

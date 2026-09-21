@@ -39,6 +39,10 @@ class AnomalyDetector:
         if mgcp_events:
             anomalies.extend(self._check_mgcp_anomalies(mgcp_events))
 
+        for an in anomalies:
+            if not an.call_id:
+                an.call_id = session.session_id
+
         return anomalies
 
     def _check_isdn_anomalies(self, events: List[VoiceEvent]) -> List[CallAnomaly]:

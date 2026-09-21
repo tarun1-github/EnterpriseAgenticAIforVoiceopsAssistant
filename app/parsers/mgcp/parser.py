@@ -14,7 +14,7 @@ logger = get_logger("parsers.mgcp")
 MGCP_BANNER_PATTERN = re.compile(
     r"(?:(?P<seq>\d+):\s+)?"
     r"(?:\*(?P<timestamp>[A-Za-z]{3}\s+\d+\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?):\s+)?"
-    r"MGCP Packet (?P<dir_text>received from|sent to)\s+(?P<ip>[0-9a-zA-Z\.\-]+):(?P<port>\d+)\s*--->?",
+    r"MGCP Packet (?P<dir_text>received from|sent to)\s+(?P<ip>[0-9a-zA-Z\.\-]+):(?P<port>\d+)(?:\s*--->?)?",
     re.IGNORECASE,
 )
 

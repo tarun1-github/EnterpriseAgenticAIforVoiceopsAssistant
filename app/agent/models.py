@@ -30,6 +30,7 @@ class RootCauseFinding(BaseModel):
     confidence: str = "Low"  # High, Medium, Low
     missing_evidence: Optional[str] = None
     facts: List[str] = Field(default_factory=list)
+    correlations: List[str] = Field(default_factory=list)
     inferences: List[str] = Field(default_factory=list)
     hypotheses: List[str] = Field(default_factory=list)
 
@@ -43,6 +44,14 @@ class AgentAnalysisResult(BaseModel):
     source_files: List[str] = Field(default_factory=list)
     model_provider: str = "VoiceOps-DeepReasoning-Engine"
     analysis_version: str = "1.0.0"
+
+    # Call-scoped summary metadata
+    call_id: Optional[str] = None
+    calling_number: Optional[str] = None
+    called_number: Optional[str] = None
+    start_time_ist: Optional[str] = None
+    end_time_ist: Optional[str] = None
+    duration: Optional[str] = None
 
     # Section 1: Executive Summary
     executive_summary: str = Field(..., description="High-level engineering explanation of the call trace")
@@ -73,3 +82,8 @@ class AgentAnalysisResult(BaseModel):
 
     # Full Formatted Markdown Report
     markdown_report: str = Field("", description="Complete 8-section markdown report")
+
+    @property
+    def summary_markdown(self) -> str:
+        return self.markdown_report
+

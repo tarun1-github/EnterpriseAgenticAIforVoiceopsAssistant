@@ -122,7 +122,7 @@ def detect_call_architecture(
     checklist: List[str] = []
     if has_isdn:
         checklist.append(f"✓ ISDN Q.931 detected ({proto_counts.get('ISDN', 0)} frames)")
-    if has_pri:
+    if has_pri and has_isdn:
         checklist.append("✓ PRI interface signaling detected")
     if has_mgcp:
         checklist.append(f"✓ MGCP packets detected ({proto_counts.get('MGCP', 0)} packets)")
@@ -133,7 +133,7 @@ def detect_call_architecture(
 
     # ARCHITECTURE EVALUATION
     # Option 1: PSTN -> ISDN PRI -> Voice Gateway -> MGCP -> CUCM -> SIP -> Phone
-    if (has_isdn and has_mgcp) or (has_mgcp and has_cucm_sdl and has_isdn):
+    if has_isdn and has_mgcp:
         arch_name = "PSTN → ISDN PRI → Voice Gateway → MGCP → CUCM → SIP → Phone"
         flow_vert = (
             "PSTN\n"
@@ -258,14 +258,10 @@ def detect_call_architecture(
             has_sip=True,
         )
 
-    # Fallback if only MGCP present
+    # Fallback if only MGCP present without ISDN
     elif has_mgcp and not has_isdn:
-        arch_name = "PSTN → ISDN PRI → Voice Gateway → MGCP → CUCM → SIP → Phone"
+        arch_name = "Voice Gateway → MGCP → CUCM → SIP → Phone" if has_sip else "Voice Gateway → MGCP → CUCM"
         flow_vert = (
-            "PSTN\n"
-            "↓\n"
-            "ISDN PRI\n"
-            "↓\n"
             "Voice Gateway\n"
             "↓\n"
             "MGCP\n"
@@ -275,17 +271,18 @@ def detect_call_architecture(
             "SIP\n"
             "↓\n"
             "Phone"
-        )
-        flow_horiz = "PSTN  ──[ISDN PRI]──▶  Voice Gateway  ──[MGCP]──▶  CUCM  ──[SIP]──▶  Phone"
+        ) if has_sip else "Voice Gateway\n↓\nMGCP\n↓\nCUCM"
+        flow_horiz = "Voice Gateway  ──[MGCP]──▶  CUCM  ──[SIP]──▶  Phone" if has_sip else "Voice Gateway  ──[MGCP]──▶  CUCM"
 
+        conf_str = "Medium" if has_cucm_sdl else "Low"
         return ArchitectureEvidence(
             architecture_name=arch_name,
             architecture_enum=CallArchitecture.ISDN_MGCP,
             flow_vertical=flow_vert,
             flow_horizontal=flow_horiz,
             evidence_checklist=checklist,
-            confidence="Medium",
-            confidence_score=0.75,
+            confidence=conf_str,
+            confidence_score=0.70 if has_cucm_sdl else 0.55,
             protocol_counts=proto_counts,
             has_isdn=False,
             has_pri_interface=False,

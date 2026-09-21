@@ -1,7 +1,8 @@
 """Scoring parameters and weights for multi-signal call correlation."""
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
+from app.core.timestamps import ensure_utc
 from app.models.event import ProtocolEnum, VoiceEvent
 
 
@@ -15,8 +16,8 @@ class CorrelationConfig:
 
     # Signal Weights (additive evidence)
     weight_direct_call_id: float = 0.65
-    weight_call_reference: float = 0.60
-    weight_mgcp_transaction: float = 0.60
+    weight_call_reference: float = 0.65
+    weight_mgcp_transaction: float = 0.65
     weight_mgcp_call_id: float = 0.55
     weight_mgcp_conn_id: float = 0.45
     weight_full_addressing: float = 0.55  # Both calling (ANI) and called (DNIS) match
@@ -47,6 +48,46 @@ def normalize_isdn_callref(ref: Optional[str]) -> Optional[str]:
             return f"0x{norm:02x}"
     except ValueError:
         return ref.lower()
+
+
+import re
+
+
+def numbers_match(num1: Optional[str], num2: Optional[str]) -> bool:
+    """Check if two telephone numbers match, supporting E.164 and suffix matching."""
+    if not num1 or not num2:
+        return False
+    if num1.strip().lower() == num2.strip().lower():
+        return True
+    d1 = re.sub(r"\D", "", str(num1))
+    d2 = re.sub(r"\D", "", str(num2))
+    if not d1 or not d2:
+        return False
+    if d1 == d2:
+        return True
+    # Match trailing 7 to 10 digits for enterprise PBX / PSTN dialing plans
+    min_len = min(len(d1), len(d2))
+    if min_len >= 7:
+        if d1.endswith(d2) or d2.endswith(d1):
+            return True
+        if d1[-7:] == d2[-7:]:
+            return True
+    return False
+
+
+def _extract_all_corr_ids(e: VoiceEvent) -> Set[str]:
+    """Extract all correlation IDs, CIs, and tracking tags from a VoiceEvent."""
+    ids = set()
+    if e.correlation_ids:
+        for v in e.correlation_ids.values():
+            if v:
+                ids.add(str(v).strip())
+    if e.metadata:
+        for k in ["correlation_tag", "call_id_ci", "ccb_id", "ci", "cdcc", "app_corr", "tcp_handle"]:
+            v = e.metadata.get(k)
+            if v:
+                ids.add(str(v).strip())
+    return ids
 
 
 def evaluate_signal_score(
@@ -86,7 +127,18 @@ def evaluate_signal_score(
         ip for e in session_events for ip in [e.source_ip, e.destination_ip] if ip
     }
 
+    session_corr_tags: Set[str] = set()
+    for se in session_events:
+        session_corr_tags.update(_extract_all_corr_ids(se))
+
     # 1. Direct Identifier Matches
+    # Correlation Tag / CI (Requirement 5 & 7)
+    event_corr_tags = _extract_all_corr_ids(event)
+    matched_tags = event_corr_tags.intersection(session_corr_tags)
+    if matched_tags:
+        score += config.weight_direct_call_id
+        evidence.append(f"Matched Correlation Tag / CI: {', '.join(sorted(matched_tags))}")
+
     # SIP Call-ID
     if event.call_id and event.call_id in session_sip_cids:
         score += config.weight_direct_call_id
@@ -104,7 +156,7 @@ def evaluate_signal_score(
         evidence.append(f"Matched MGCP Transaction ID: {event.transaction_id}")
 
     # MGCP Call-ID
-    mgcp_cid = event.metadata.get("call_id") or event.call_id
+    mgcp_cid = event.metadata.get("call_id") or event.call_id or (event.metadata.get("call_id_ci") if event.metadata else None)
     if mgcp_cid and mgcp_cid in session_mgcp_cids:
         score += config.weight_mgcp_call_id
         evidence.append(f"Matched MGCP Call-ID: {mgcp_cid}")
@@ -116,13 +168,22 @@ def evaluate_signal_score(
         evidence.append(f"Matched MGCP Connection-ID: {conn_id}")
 
     # 2. Addressing Matches (ANI / DNIS)
-    calling_match = event.calling_number and event.calling_number in session_calling
-    called_match = event.called_number and event.called_number in session_called
+    calling_match = False
+    if event.calling_number:
+        calling_match = any(numbers_match(event.calling_number, sn) for sn in session_calling)
+
+    called_match = False
+    if event.called_number:
+        called_match = any(numbers_match(event.called_number, sn) for sn in session_called)
 
     # Check for addressing conflict (completely different numbers present on both sides)
-    if event.calling_number and session_calling and event.calling_number not in session_calling:
-        score -= config.penalty_address_conflict
-    elif event.called_number and session_called and event.called_number not in session_called:
+    has_calling_conflict = bool(event.calling_number and session_calling and not calling_match)
+    has_called_conflict = bool(event.called_number and session_called and not called_match)
+
+    if has_calling_conflict and has_called_conflict:
+        # Decisive anti-overcorrelation veto: both calling and called numbers conflict
+        score -= config.penalty_address_conflict * 1.5
+    elif has_calling_conflict or has_called_conflict:
         score -= config.penalty_address_conflict
     else:
         if calling_match and called_match:
@@ -135,9 +196,10 @@ def evaluate_signal_score(
 
     # 3. Temporal Proximity
     if event.timestamp:
-        session_timestamps = [e.timestamp for e in session_events if e.timestamp]
+        ev_ts = ensure_utc(event.timestamp)
+        session_timestamps = [ensure_utc(e.timestamp) for e in session_events if e.timestamp]
         if session_timestamps:
-            min_delta = min(abs((event.timestamp - ts).total_seconds()) for ts in session_timestamps)
+            min_delta = min(abs((ev_ts - ts).total_seconds()) for ts in session_timestamps)
             if min_delta <= config.max_time_gap_seconds:
                 score += config.weight_temporal_proximity * (1.0 - (min_delta / config.max_time_gap_seconds))
                 evidence.append(f"Temporal proximity within {min_delta:.2f}s")

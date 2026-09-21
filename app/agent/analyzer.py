@@ -18,6 +18,9 @@ from app.analysis.evidence import (
 )
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.timestamps import to_ist_display
+from app.correlation.ladder import CallLifecycleLadder
+from app.models.event import ProtocolEnum
 
 logger = get_logger("agent.analyzer")
 
@@ -38,9 +41,39 @@ class VoiceOpsAgentAnalyzer:
     def analysis_file(self) -> Path:
         return self._analysis_file
 
-    def analyze(self, workspace: AnalysisWorkspace) -> AgentAnalysisResult:
+    def analyze(
+        self,
+        workspace: AnalysisWorkspace,
+        selected_session_id: Optional[str] = None,
+    ) -> AgentAnalysisResult:
         """Run deep forensic engineering analysis on the ingested workspace."""
+        # 0. Call-Scoped Metadata Extraction (Requirement 14, 20 & 28)
+        selected_call: Optional[CallSession] = None
+        if selected_session_id:
+            selected_call = workspace.get_session(selected_session_id)
+        if not selected_call and workspace.call_sessions:
+            selected_call = workspace.call_sessions[0]
+
+        # Scope workspace to the selected call evidence only (if not already scoped to this session)
+        if selected_call and workspace.workspace_id != f"scoped_{selected_call.session_id}":
+            workspace = workspace.create_call_scoped_workspace(selected_call)
+
         source_file = workspace.source_files[0] if workspace.source_files else "trace.txt"
+        call_id = selected_call.session_id if selected_call else "N/A"
+        calling_num = (selected_call.calling_number if selected_call and selected_call.calling_number else None) or "Unknown"
+        called_num = (selected_call.called_number if selected_call and selected_call.called_number else None) or "Unknown"
+        start_ist = selected_call.start_time_ist if selected_call else "N/A"
+        end_ist = selected_call.end_time_ist if selected_call else "N/A"
+        duration_disp = selected_call.duration_display if selected_call else "N/A"
+
+        call_summary_text = (
+            f"- **Call ID:** `{call_id}`\n"
+            f"- **Calling Number:** `{calling_num}`\n"
+            f"- **Called Number:** `{called_num}`\n"
+            f"- **Call Start Time (IST):** `{start_ist}`\n"
+            f"- **Call End Time (IST):** `{end_ist}`\n"
+            f"- **Duration:** `{duration_disp}`"
+        )
 
         # 1. Architecture Determination
         arch_ev = workspace.architecture_evidence or detect_call_architecture(
@@ -66,16 +99,29 @@ class VoiceOpsAgentAnalyzer:
         # 6. Anomaly Analysis
         anomaly_findings: List[AnomalyFinding] = []
         for anom in workspace.anomalies:
-            ts = anom.timestamp.strftime("%H:%M:%S.%f")[:-3] if anom.timestamp else "N/A"
+            ts = to_ist_display(anom.timestamp) if anom.timestamp else "N/A"
+            anom_ev = getattr(anom, "evidence_refs", None)
+            if anom_ev:
+                ev_str = ", ".join(str(x) for x in anom_ev)
+            elif getattr(anom, "evidence", None):
+                ev_val = anom.evidence
+                ev_str = ", ".join(str(x) for x in ev_val) if isinstance(ev_val, list) else str(ev_val)
+            else:
+                ev_str = anom.description
+
+            impact_val = getattr(anom, "suggested_action", None) or "Signaling state delay or unexpected teardown"
+            proto_val = anom.protocol.value if hasattr(anom.protocol, "value") else str(anom.protocol)
+            sev_val = anom.severity.value if hasattr(anom.severity, "value") else str(anom.severity)
+
             anomaly_findings.append(
                 AnomalyFinding(
-                    severity=anom.severity.value,
+                    severity=sev_val,
                     timestamp=ts,
-                    protocol=anom.protocol.value,
+                    protocol=proto_val,
                     description=anom.description,
-                    evidence=anom.evidence or anom.description,
-                    impact=anom.suggested_action or "Signaling state delay or unexpected teardown",
-                    likely_location=anom.protocol.value + " Call Leg",
+                    evidence=ev_str,
+                    impact=impact_val,
+                    likely_location=proto_val + " Call Leg",
                     confidence="High",
                 )
             )
@@ -97,24 +143,154 @@ class VoiceOpsAgentAnalyzer:
             root_cause=root_cause_finding,
         )
 
+        # Trace Sources Breakdown (Section 27)
+        cucm_files = sorted(list({e.source for e in workspace.events if e.source and (e.trace_type == "CUCM_SDL" or e.protocol == ProtocolEnum.CUCM)}))
+        isdn_files = sorted(list({e.source for e in workspace.events if e.source and e.protocol == ProtocolEnum.ISDN}))
+        sip_files = sorted(list({e.source for e in workspace.events if e.source and e.protocol == ProtocolEnum.SIP}))
+        mgcp_files = sorted(list({e.source for e in workspace.events if e.source and e.protocol == ProtocolEnum.MGCP}))
+
+        trace_cucm_sdl = "\n".join(f"- `{f}`" for f in cucm_files) if cucm_files else "*(None observed)*"
+        trace_isdn = "\n".join(f"- `{f}`" for f in isdn_files) if isdn_files else "*(None observed)*"
+        trace_sip = "\n".join(f"- `{f}`" for f in sip_files) if sip_files else "*(None observed)*"
+        trace_mgcp = "\n".join(f"- `{f}`" for f in mgcp_files) if mgcp_files else "*(None observed)*"
+
+        # Lifecycle Ladder (Section 17, 18, 19)
+        ladder_gen = CallLifecycleLadder()
+        call_lifecycle_ladder = ladder_gen.generate_ascii_ladder(selected_call) if selected_call else "*(No events)*"
+
+        # Cross-Protocol Correlation Explanation (Section 21)
+        corr_facts: List[str] = []
+        for ev in workspace.events[:15]:
+            if ev.message_type and ev.timestamp:
+                ts_str = ev.timestamp_ist_str.split()[-1] if " " in ev.timestamp_ist_str else ev.timestamp_ist_str
+                corr_facts.append(f"FACT: {ev.protocol.value} {ev.message_type} observed at: {ts_str} IST in `{ev.source}`")
+
+        corr_details = []
+        if selected_call:
+            if selected_call.isdn_call_references:
+                corr_details.append(f"ISDN Call Reference: {', '.join(selected_call.isdn_call_references)}")
+            if selected_call.mgcp_transaction_ids:
+                corr_details.append(f"MGCP Trans ID: {', '.join(selected_call.mgcp_transaction_ids)}")
+            if selected_call.sip_call_ids:
+                corr_details.append(f"SIP Call-ID: {', '.join(selected_call.sip_call_ids)}")
+            if selected_call.calling_number and selected_call.calling_number != "Unknown":
+                corr_details.append(f"ANI: {selected_call.calling_number}")
+            if selected_call.called_number and selected_call.called_number != "Unknown":
+                corr_details.append(f"DNIS: {selected_call.called_number}")
+
+        conf_name = selected_call.confidence_level if selected_call else "High"
+        corr_explanation = "\n".join(corr_facts)
+        if corr_details:
+            corr_explanation += (
+                f"\n\nCORRELATION:\nThese events are temporally and contextually correlated into call session `{call_id}` "
+                f"via {'; '.join(corr_details)} with {conf_name} confidence."
+            )
+        else:
+            corr_explanation += f"\n\nCORRELATION:\nThese events are temporally correlated into call session `{call_id}`."
+        corr_explanation += (
+            "\n\nINFERENCE:\nThe call progressed across protocol legs according to the detected architecture "
+            "without signaling contradiction."
+        )
+
+        # Protocol-specific analyses (Section 27)
+        isdn_evs = [e for e in workspace.events if e.protocol == ProtocolEnum.ISDN]
+        if isdn_evs:
+            isdn_lines = [f"- Observed {len(isdn_evs)} ISDN Q.931 frame(s):"]
+            for e in isdn_evs[:10]:
+                cr = f" (cr={e.call_reference})" if e.call_reference else ""
+                isdn_lines.append(f"  - `{e.message_type}`{cr} at {e.timestamp_ist_str}")
+            isdn_text = "\n".join(isdn_lines)
+        else:
+            isdn_text = "*(No ISDN signaling events in this call)*"
+
+        mgcp_evs = [e for e in workspace.events if e.protocol == ProtocolEnum.MGCP]
+        if mgcp_evs:
+            mgcp_lines = [f"- Observed {len(mgcp_evs)} MGCP gateway control message(s):"]
+            for e in mgcp_evs[:10]:
+                tr = f" (trans={e.transaction_id})" if e.transaction_id else ""
+                mgcp_lines.append(f"  - `{e.message_type}`{tr} at {e.timestamp_ist_str}")
+            mgcp_text = "\n".join(mgcp_lines)
+        else:
+            mgcp_text = "*(No MGCP signaling events in this call)*"
+
+        sip_evs = [e for e in workspace.events if e.protocol == ProtocolEnum.SIP]
+        if sip_evs:
+            sip_lines = [f"- Observed {len(sip_evs)} SIP dialog message(s):"]
+            for e in sip_evs[:10]:
+                cid = f" (Call-ID={e.call_id})" if e.call_id else ""
+                sip_lines.append(f"  - `{e.message_type}`{cid} at {e.timestamp_ist_str}")
+            sip_text = "\n".join(sip_lines)
+        else:
+            sip_text = "*(No SIP dialog events in this call)*"
+
+        # Recommended Next Troubleshooting Commands (Section 27)
+        cmd_lines: List[str] = []
+        cmd_lines.append("### CUCM Commands:")
+        cmd_lines.append("- `show status`")
+        cmd_lines.append("- `utils ccm-service status`")
+        cmd_lines.append("- `show perf query class \"Cisco CallManager\"`\n")
+
+        if arch_ev.has_isdn or arch_ev.has_mgcp or "Gateway" in arch_ev.architecture_name:
+            cmd_lines.append("### Voice Gateway Commands:")
+            if arch_ev.has_isdn:
+                cmd_lines.append("- `show isdn status`")
+                cmd_lines.append("- `show isdn active`")
+            if arch_ev.has_mgcp:
+                cmd_lines.append("- `show mgcp endpoint`")
+                cmd_lines.append("- `show mgcp connection`")
+            if arch_ev.has_sip:
+                cmd_lines.append("- `show sip-ua status`")
+                cmd_lines.append("- `show ccsip calls`")
+            cmd_lines.append("- `show voice call summary`")
+            cmd_lines.append("- `show dial-peer voice summary`")
+        recommended_cmds_text = "\n".join(cmd_lines)
+
         # Build Full Markdown Report
+        arch_flow_text = selected_call.architecture_flow_vertical if selected_call else arch_ev.flow_vertical
         markdown = self._format_markdown_report(
+            calling=calling_num,
+            called=called_num,
+            start_ist=start_ist,
+            end_ist=end_ist,
+            call_summary=call_summary_text,
+            trace_cucm_sdl=trace_cucm_sdl,
+            trace_isdn=trace_isdn,
+            trace_sip=trace_sip,
+            trace_mgcp=trace_mgcp,
             exec_summary=exec_summary,
+            arch_flow=arch_flow_text,
             arch_ev=arch_ev,
+            call_lifecycle_ladder=call_lifecycle_ladder,
             call_flow=call_flow_lines,
+            cross_protocol_correlation=corr_explanation,
             signaling_map=signaling_map,
+            isdn_analysis=isdn_text,
+            mgcp_analysis=mgcp_text,
+            sip_analysis=sip_text,
             sdl_obs=sdl_observations,
             timing_deltas=timing_deltas,
+            observations=exec_summary,
             anomalies=anomaly_findings,
+            facts=root_cause_finding.facts,
+            correlations=root_cause_finding.correlations,
+            inferences=root_cause_finding.inferences,
+            hypotheses=root_cause_finding.hypotheses,
             root_cause=root_cause_finding,
+            recommended_commands=recommended_cmds_text,
         )
 
         result = AgentAnalysisResult(
+            call_id=call_id,
+            calling_number=calling_num,
+            called_number=called_num,
+            start_time_ist=start_ist,
+            end_time_ist=end_ist,
+            duration=duration_disp,
             trace_ids=workspace.trace_ids,
             source_files=workspace.source_files,
             executive_summary=exec_summary,
             architecture_name=arch_ev.architecture_name,
-            architecture_flow=arch_ev.flow_vertical,
+            architecture_flow=arch_flow_text,
             architecture_evidence=arch_ev.evidence_checklist,
             architecture_confidence=arch_ev.confidence,
             call_flow=call_flow_lines,
@@ -136,8 +312,9 @@ class VoiceOpsAgentAnalyzer:
         timing: List[TimingDelta],
         arch_ev: ArchitectureEvidence,
     ) -> RootCauseFinding:
-        """Derive root cause distinguishing FACTS, INFERENCES, and HYPOTHESES."""
+        """Derive root cause distinguishing FACTS, CORRELATIONS, INFERENCES, and HYPOTHESES."""
         facts: List[str] = []
+        correlations: List[str] = []
         inferences: List[str] = []
         hypotheses: List[str] = []
 
@@ -151,6 +328,10 @@ class VoiceOpsAgentAnalyzer:
             facts.append("SIP dialog messages were decoded between CUCM and endpoint(s).")
         if arch_ev.has_cucm_sdl:
             facts.append("CUCM internal SDL signals were processed (MGCPManager/SIPD/StationInit).")
+
+        # Correlations: cross-protocol linkage from correlated session
+        if workspace.call_sessions and workspace.call_sessions[0].correlation_evidence:
+            correlations.extend(workspace.call_sessions[0].correlation_evidence)
 
         # Inferences: logically deduced from protocols
         if arch_ev.has_isdn and arch_ev.has_mgcp:
@@ -172,6 +353,7 @@ class VoiceOpsAgentAnalyzer:
                 confidence="High",
                 missing_evidence=None,
                 facts=facts,
+                correlations=correlations,
                 inferences=inferences,
                 hypotheses=hypotheses,
             )
@@ -188,6 +370,7 @@ class VoiceOpsAgentAnalyzer:
                 confidence="High",
                 missing_evidence=None,
                 facts=facts,
+                correlations=correlations,
                 inferences=inferences,
                 hypotheses=hypotheses,
             )
@@ -195,11 +378,12 @@ class VoiceOpsAgentAnalyzer:
         # Insufficient evidence case
         return RootCauseFinding(
             has_root_cause=False,
-            root_cause=None,
+            root_cause="Root cause not established from available evidence.",
             evidence=[],
             confidence="Low",
             missing_evidence="Trace does not contain downstream media negotiation or complete gateway debugs to isolate root cause conclusively.",
             facts=facts,
+            correlations=correlations,
             inferences=inferences,
             hypotheses=["Potential downstream network jitter or endpoint ring-no-answer"],
         )
@@ -239,24 +423,41 @@ class VoiceOpsAgentAnalyzer:
 
     def _format_markdown_report(
         self,
+        calling: str,
+        called: str,
+        start_ist: str,
+        end_ist: str,
+        call_summary: str,
+        trace_cucm_sdl: str,
+        trace_isdn: str,
+        trace_sip: str,
+        trace_mgcp: str,
         exec_summary: str,
+        arch_flow: str,
         arch_ev: ArchitectureEvidence,
+        call_lifecycle_ladder: str,
         call_flow: List[str],
+        cross_protocol_correlation: str,
         signaling_map: Dict[str, List[str]],
+        isdn_analysis: str,
+        mgcp_analysis: str,
+        sip_analysis: str,
         sdl_obs: List[SDLObservation],
         timing_deltas: List[TimingDelta],
+        observations: str,
         anomalies: List[AnomalyFinding],
+        facts: List[str],
+        correlations: List[str],
+        inferences: List[str],
+        hypotheses: List[str],
         root_cause: RootCauseFinding,
+        recommended_commands: str,
     ) -> str:
-        """Render complete, beautiful GitHub-flavored markdown engineering report."""
-        # Section 2: Architecture
-        arch_flow_text = f"```text\n{arch_ev.flow_vertical}\n```"
+        """Render complete, beautiful GitHub-flavored markdown engineering report matching Section 27."""
         arch_ev_text = "\n".join(f"- {item}" for item in arch_ev.evidence_checklist)
-
-        # Section 3: Call Flow
         call_flow_text = "```text\n" + "\n".join(call_flow[:25]) + "\n```" if call_flow else "No chronological events parsed."
 
-        # Section 4: Signaling Analysis
+        # Signaling text
         sig_lines: List[str] = []
         for proto, msgs in signaling_map.items():
             if msgs:
@@ -267,11 +468,11 @@ class VoiceOpsAgentAnalyzer:
                 sig_lines.append(f"### {proto}:\n- *(No messages observed)*")
         signaling_text = "\n".join(sig_lines)
 
-        # Section 5: CUCM SDL Analysis
-        sdl_lines: List[str] = []
+        # SDL text
         if not sdl_obs:
             sdl_text = "*(No specific CUCM SDL process signals isolated in trace)*"
         else:
+            sdl_lines = []
             for obs in sdl_obs[:15]:
                 sdl_lines.append(
                     f"#### ⏱️ `{obs.timestamp}` | **{obs.event_name}** ({obs.process_name or 'CUCM'})\n"
@@ -282,13 +483,14 @@ class VoiceOpsAgentAnalyzer:
                 )
             sdl_text = "\n".join(sdl_lines)
 
-        # Section 6: Timing Analysis
-        timing_lines: List[str] = []
+        # Timing text
         if not timing_deltas:
             timing_text = "*(Insufficient timestamps to evaluate progression deltas)*"
         else:
-            timing_lines.append("| Transition | Start | End | Delta (ms) | Status | Note |")
-            timing_lines.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
+            timing_lines = [
+                "| Transition | Start | End | Delta (ms) | Status | Note |",
+                "| :--- | :--- | :--- | :--- | :--- | :--- |",
+            ]
             for t in timing_deltas:
                 stat_icon = "⚠️ DELAY" if t.is_suspicious else "✅ Normal"
                 timing_lines.append(
@@ -296,11 +498,11 @@ class VoiceOpsAgentAnalyzer:
                 )
             timing_text = "\n".join(timing_lines)
 
-        # Section 7: Anomaly Analysis
+        # Anomaly text
         if not anomalies:
             anomaly_text = "✅ **No signaling anomalies or unexpected disconnects isolated.**"
         else:
-            anom_lines: List[str] = []
+            anom_lines = []
             for an in anomalies:
                 icon = "🚨" if an.severity == "ERROR" else "⚠️"
                 anom_lines.append(
@@ -313,8 +515,8 @@ class VoiceOpsAgentAnalyzer:
                 )
             anomaly_text = "\n".join(anom_lines)
 
-        # Section 8: Root Cause Analysis
-        rc_lines: List[str] = []
+        # Root cause text
+        rc_lines = []
         if root_cause.has_root_cause:
             rc_lines.append(f"### **Root Cause:**\n{root_cause.root_cause}\n")
             rc_lines.append("#### **Evidence:**")
@@ -322,36 +524,46 @@ class VoiceOpsAgentAnalyzer:
                 rc_lines.append(f"{i}. {ev_item}")
             rc_lines.append(f"\n**Confidence:** `{root_cause.confidence}`\n")
         else:
-            rc_lines.append("### **Insufficient evidence to establish root cause.**\n")
+            rc_lines.append(f"### **{root_cause.root_cause or 'Root cause not established from available evidence.'}**\n")
             if root_cause.missing_evidence:
                 rc_lines.append(f"**Missing Evidence Required:**\n{root_cause.missing_evidence}\n")
 
-        # Distinguish Fact, Inference, Hypothesis
-        rc_lines.append("### Engineering Reasoning Matrix:")
-        rc_lines.append("#### 📌 Facts (Directly observed):")
-        for f in root_cause.facts:
-            rc_lines.append(f"- {f}")
-        rc_lines.append("#### 💡 Inferences (Protocol deductions):")
-        for inf in root_cause.inferences:
-            rc_lines.append(f"- {inf}")
-        if root_cause.hypotheses:
-            rc_lines.append("#### 🔬 Hypotheses (Requiring external validation):")
-            for h in root_cause.hypotheses:
-                rc_lines.append(f"- {h}")
-
-        root_cause_text = "\n".join(rc_lines)
+        facts_text = "\n".join(f"- {f}" for f in facts) if facts else "- No explicit facts isolated."
+        corrs_text = "\n".join(f"- {c}" for c in correlations) if correlations else "- Correlation based on available signaling progression."
+        infs_text = "\n".join(f"- {i}" for i in inferences) if inferences else "- Normal call state progression."
+        hyps_text = "\n".join(f"- {h}" for h in hypotheses) if hypotheses else "- No secondary hypotheses required."
 
         report = ANALYSIS_REPORT_TEMPLATE.format(
+            calling=calling,
+            called=called,
+            start_ist=start_ist,
+            end_ist=end_ist,
+            call_summary=call_summary,
+            trace_cucm_sdl=trace_cucm_sdl,
+            trace_isdn=trace_isdn,
+            trace_sip=trace_sip,
+            trace_mgcp=trace_mgcp,
             executive_summary=exec_summary,
-            architecture_flow=arch_flow_text,
+            architecture_flow=arch_flow,
             architecture_evidence=arch_ev_text,
             architecture_confidence=arch_ev.confidence,
+            call_lifecycle_ladder=call_lifecycle_ladder,
             call_flow=call_flow_text,
+            cross_protocol_correlation=cross_protocol_correlation,
             signaling_analysis=signaling_text,
+            isdn_analysis=isdn_analysis,
+            mgcp_analysis=mgcp_analysis,
+            sip_analysis=sip_analysis,
             sdl_analysis=sdl_text,
             timing_analysis=timing_text,
+            observations=observations,
             anomaly_analysis=anomaly_text,
-            root_cause_section=root_cause_text,
+            facts=facts_text,
+            correlations=corrs_text,
+            inferences=infs_text,
+            hypotheses=hyps_text,
+            root_cause_section="\n".join(rc_lines),
+            recommended_commands=recommended_commands,
         )
         return report
 

@@ -58,12 +58,66 @@ class VoiceEvent(BaseModel):
     endpoint: Optional[str] = Field(default=None, description="MGCP endpoint or device name")
     device: Optional[str] = Field(default=None, description="CUCM device name or gateway name")
 
+    # Classification & Provenance
+    trace_type: Optional[str] = Field(default=None, description="CUCM_SDL, ISDN_Q931, SIP, MGCP, CCAPI")
+    device_type: Optional[str] = Field(default=None, description="CUCM, VOICE_GATEWAY, CUBE, IOS_ROUTER, SIP_ENDPOINT")
+    device_name: Optional[str] = Field(default=None, description="Device hostname or prompt")
+    device_ip: Optional[str] = Field(default=None, description="Device IP address")
+    destination: Optional[str] = Field(default=None, description="Destination device, host, or endpoint")
+    correlation_ids: Dict[str, Any] = Field(default_factory=dict, description="Extracted correlation key-values")
+    trace_id: Optional[str] = Field(default=None, description="Parent trace artifact identifier")
+    timestamp_timezone: Optional[str] = Field(default=None, description="Original timestamp timezone string")
+
     # Status & Disposition
     cause_code: Optional[str] = Field(default=None, description="ISDN Q.850 cause code or SIP response reason")
 
     # Trace Text and Extensibility
     raw: str = Field(..., description="Exact raw log block for this event")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Extensible protocol-specific metadata")
+
+    @property
+    def event_id(self) -> str:
+        return self.id
+
+    @property
+    def timestamp_original(self) -> Optional[str]:
+        return self.timestamp_raw
+
+    @property
+    def raw_text(self) -> str:
+        return self.raw
+
+    @property
+    def parsed_fields(self) -> Dict[str, Any]:
+        return self.metadata
+
+    @property
+    def timestamp_utc(self) -> Optional[datetime]:
+        """Canonical UTC datetime."""
+        from datetime import timezone
+        if self.timestamp is None:
+            return None
+        if self.timestamp.tzinfo is None:
+            return self.timestamp.replace(tzinfo=timezone.utc)
+        return self.timestamp.astimezone(timezone.utc)
+
+    @property
+    def timestamp_ist(self) -> Optional[datetime]:
+        """Canonical Asia/Kolkata (IST) datetime."""
+        from app.core.timestamps import IST_TZ
+        utc_dt = self.timestamp_utc
+        if utc_dt is None:
+            return None
+        return utc_dt.astimezone(IST_TZ)
+
+    @property
+    def timestamp_ist_str(self) -> str:
+        """Formatted string in Asia/Kolkata IST."""
+        ist_dt = self.timestamp_ist
+        if ist_dt is None:
+            return self.timestamp_raw or "N/A"
+        return ist_dt.strftime("%d-%b-%Y %H:%M:%S.") + f"{ist_dt.microsecond // 1000:03d} IST"
+
 
     @model_validator(mode="before")
     @classmethod

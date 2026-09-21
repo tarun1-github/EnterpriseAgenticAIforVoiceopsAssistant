@@ -3,7 +3,8 @@
 from typing import Any, List, Optional
 from uuid import uuid4
 from app.core.logging import get_logger
-from app.correlation.matchers import extract_session_identifiers, infer_call_architecture
+from app.core.timestamps import ensure_utc
+from app.correlation.matchers import extract_session_identifiers, infer_call_architecture, is_call_seed_candidate
 from app.correlation.scoring import CorrelationConfig, evaluate_signal_score
 from app.models.call_session import CallSession
 from app.models.event import VoiceEvent
@@ -22,6 +23,7 @@ class CorrelationEngine:
         """Initialize engine with configurable thresholds and optional anomaly detector."""
         self.config = config or CorrelationConfig()
         self.anomaly_detector = anomaly_detector
+        self.last_statistics: dict = {}
 
     def correlate(self, events: List[VoiceEvent]) -> List[CallSession]:
         """Group and correlate a list of VoiceEvents into distinct CallSessions.
@@ -33,17 +35,25 @@ class CorrelationEngine:
             List of correlated CallSession instances.
         """
         if not events:
+            self.last_statistics = {
+                "total_events": 0,
+                "correlated_calls": 0,
+                "events_assigned_to_calls": 0,
+                "events_not_assigned": 0,
+                "uncorrelated_events": 0,
+            }
             return []
 
         # Sort events chronologically where timestamps exist, preserving file order for un-timestamped
         sorted_events = sorted(
             events,
-            key=lambda e: (e.timestamp is None, e.timestamp)
+            key=lambda e: (e.timestamp is None, ensure_utc(e.timestamp) if e.timestamp else None)
         )
 
         clusters: List[List[VoiceEvent]] = []
         cluster_evidence: List[List[str]] = []
         cluster_scores: List[List[float]] = []
+        unassigned_events: List[VoiceEvent] = []
 
         for event in sorted_events:
             best_idx = -1
@@ -61,11 +71,13 @@ class CorrelationEngine:
                 clusters[best_idx].append(event)
                 cluster_evidence[best_idx].extend(best_evidence)
                 cluster_scores[best_idx].append(best_score)
-            else:
+            elif is_call_seed_candidate(event):
                 # Seed a new session cluster
                 clusters.append([event])
                 cluster_evidence.append(["Initial call seed event"])
                 cluster_scores.append([1.0])
+            else:
+                unassigned_events.append(event)
 
         # Second Pass: Merge clusters that share high-confidence cross-protocol bridges
         merged_clusters, merged_evidence, merged_scores = self._merge_interdependent_clusters(
@@ -84,6 +96,41 @@ class CorrelationEngine:
             # Overall confidence is the mean affinity of correlated links
             avg_score = sum(cl_sc) / len(cl_sc) if cl_sc else 1.0
 
+            # Trace sources contributing to this session
+            trace_sources = sorted(list({e.source for e in cl_events if e.source}))
+
+            # Evaluate confidence level (Section 25: High, Medium, Low)
+            has_shared_id = bool(
+                identifiers["sip_call_ids"]
+                or identifiers["isdn_call_references"]
+                or identifiers["mgcp_transaction_ids"]
+                or identifiers["mgcp_call_ids"]
+                or identifiers["mgcp_connection_ids"]
+                or any(e.correlation_ids for e in cl_events)
+            )
+            has_full_numbers = bool(
+                identifiers["calling_number"] and identifiers["calling_number"] != "Unknown"
+                and identifiers["called_number"] and identifiers["called_number"] != "Unknown"
+            )
+            has_any_number = bool(
+                (identifiers["calling_number"] and identifiers["calling_number"] != "Unknown")
+                or (identifiers["called_number"] and identifiers["called_number"] != "Unknown")
+            )
+
+            if (has_shared_id and has_full_numbers) or (has_shared_id and avg_score >= 0.70):
+                conf_level = "High"
+            elif has_full_numbers or (has_any_number and avg_score >= 0.50):
+                conf_level = "Medium"
+            else:
+                conf_level = "Low"
+
+            # Ambiguity notes (Section 24 & 25)
+            ambiguity_notes: List[str] = []
+            if len(trace_sources) > 1 and conf_level == "Low":
+                ambiguity_notes.append("Cross-file correlation based primarily on temporal proximity; verify against router logs.")
+            if not has_shared_id and len(trace_sources) > 1:
+                ambiguity_notes.append("No explicit cross-protocol call identifier found between trace files.")
+
             session = CallSession(
                 session_id=f"call_{uuid4().hex[:8]}",
                 architecture=architecture,
@@ -99,8 +146,11 @@ class CorrelationEngine:
                 sip_call_ids=identifiers["sip_call_ids"],
                 devices=identifiers["devices"],
                 endpoints=identifiers["endpoints"],
+                trace_sources=trace_sources,
                 correlation_confidence=round(avg_score, 2),
+                confidence_level=conf_level,
                 correlation_evidence=unique_evidence,
+                ambiguity_notes=ambiguity_notes,
                 anomalies=[],
             )
 
@@ -112,6 +162,29 @@ class CorrelationEngine:
                     logger.error("Anomaly detector error on session %s: %s", session.session_id, exc)
 
             sessions.append(session)
+
+        # Check for potentially ambiguous sessions (occurring within 5s of each other with missing IDs)
+        potentially_ambiguous_cnt = 0
+        for i, s1 in enumerate(sessions):
+            for j in range(i + 1, len(sessions)):
+                s2 = sessions[j]
+                if s1.start_time and s2.start_time:
+                    delta = abs((ensure_utc(s1.start_time) - ensure_utc(s2.start_time)).total_seconds())
+                    if delta <= 5.0:
+                        s1.ambiguity_notes.append(f"Simultaneous call {s2.session_id} active within {delta:.1f}s.")
+                        s2.ambiguity_notes.append(f"Simultaneous call {s1.session_id} active within {delta:.1f}s.")
+                        potentially_ambiguous_cnt += 1
+
+        assigned_event_count = sum(len(s.events) for s in sessions)
+        not_assigned_count = len(events) - assigned_event_count
+        self.last_statistics = {
+            "total_events": len(events),
+            "correlated_calls": len(sessions),
+            "events_assigned_to_calls": assigned_event_count,
+            "events_not_assigned": not_assigned_count,
+            "uncorrelated_events": not_assigned_count,
+            "potentially_ambiguous": potentially_ambiguous_cnt,
+        }
 
         logger.info("Correlated %d events into %d CallSession(s)", len(events), len(sessions))
         return sessions

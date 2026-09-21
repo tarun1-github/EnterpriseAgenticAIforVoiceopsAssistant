@@ -1,0 +1,50 @@
+version: "1.0.0"
+category: "failure_patterns"
+protocol: "SIP"
+
+failures:
+  - code: "SIP_503_SERVICE_UNAVAILABLE"
+    title: "SIP 503 Service Unavailable"
+    symptoms:
+      - "Outbound call drops with fast busy signal"
+      - "CUCM receives 503 Service Unavailable or generates 503 towards caller"
+    possible_causes:
+      - "SIP Trunk destination IP unreachable or peer daemon unresponsive"
+      - "CAC (Call Admission Control) bandwidth exhaustion on Location"
+      - "Codec mismatch or lack of available MTP / Transcoder resources"
+      - "CUBE / SBC circuit exhaustion"
+    recommended_checks:
+      - "Check Reason header in 503 message (e.g. Q.850 cause=34 or cause=41)"
+      - "Inspect CUCM Locations and CAC bandwidth utilization"
+      - "Verify SIP Trunk options ping status in CUCM Serviceability"
+      - "Verify MTP allocation under Cdcc SDL events"
+    confidence: high
+    source_reference: "Cisco IP Telephony Troubleshooting Guide - SIP 503"
+
+  - code: "SIP_404_NOT_FOUND"
+    title: "SIP 404 Not Found"
+    symptoms:
+      - "Call immediately disconnects with unallocated number"
+    possible_causes:
+      - "Dialed number does not match any route pattern or DN in target partition"
+      - "Digit transformation truncated needed prefix or country code"
+      - "Far-end SIP provider rejected request URI format"
+    recommended_checks:
+      - "Verify Calling Search Space (CSS) partition list"
+      - "Inspect DigitAnalysis DaRes SDL events for matched pattern"
+    confidence: high
+    source_reference: "Cisco Dial Plan Configuration Guide"
+
+  - code: "PREMATURE_DISCONNECT_NO_CONNECT"
+    title: "Caller Hangup Prior to Answer (Aborted Call)"
+    symptoms:
+      - "INVITE followed by 180 Ringing, then immediate CANCEL or BYE without 200 OK"
+    possible_causes:
+      - "Calling party hung up before callee answered"
+      - "No-answer forward timer expired without destination configured"
+      - "Far-end ring-no-answer timeout"
+    recommended_checks:
+      - "Check who initiated CANCEL/BYE (UAC vs UAS)"
+      - "Check duration between 180 Ringing and CANCEL"
+    confidence: high
+    source_reference: "Cisco CUCM Call Processing Troubleshooting"

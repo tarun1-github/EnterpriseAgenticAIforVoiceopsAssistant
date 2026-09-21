@@ -30,6 +30,14 @@ ISDN_HEADER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+ISDN_FLEXIBLE_PATTERN = re.compile(
+    r"(?:ISDN\s+(?:Q\.?931\s+)?|Q931:\s+)"
+    r"(?:(?P<direction>RX\s*<-|TX\s*->|RX|TX|INBOUND|OUTBOUND)[\s<>-]*)?"
+    r"(?P<msg_type>SETUP|CALL_PROC(?:EEDING)?|ALERTING|CONNECT(?:_ACK)?|DISCONNECT|RELEASE(?:_COMP(?:LETE)?)?|STATUS(?:_ENQ(?:UIRY)?)?|NOTIFY|PROGRESS|FACILITY)"
+    r"(?:.*?(?:cr|callref)\s*=\s*(?P<callref>0x[0-9a-fA-F]+|\d+))?",
+    re.IGNORECASE,
+)
+
 # IE extraction patterns
 CALLING_NUM_PATTERN = re.compile(
     r"Calling\s+Party\s+Number(?:\s+i\s*=[^,\n\r]+)?,\s*'([^']+)'",
@@ -72,7 +80,8 @@ class ISDNParser(BaseParser):
         current_block_lines: List[str] = []
 
         for line in lines:
-            header_match = ISDN_HEADER_PATTERN.search(line.strip())
+            line_s = line.strip()
+            header_match = ISDN_HEADER_PATTERN.search(line_s) or ISDN_FLEXIBLE_PATTERN.search(line_s)
             if header_match:
                 # If we were already collecting a message block, process it now
                 if current_header_match:
@@ -103,21 +112,22 @@ class ISDNParser(BaseParser):
     ) -> Optional[VoiceEvent]:
         """Extract structured fields from header and message block lines."""
         raw_block = "\n".join(block_lines)
+        gdict = header_match.groupdict()
 
-        raw_timestamp = header_match.group("timestamp")
+        raw_timestamp = gdict.get("timestamp")
         timestamp_clean = raw_timestamp.strip(": ") if raw_timestamp else None
 
-        interface = header_match.group("interface")
-        raw_dir = header_match.group("direction").upper()
-        raw_msg_type = header_match.group("msg_type").upper()
-        callref = header_match.group("callref")
-        pd = header_match.group("pd")
+        interface = gdict.get("interface")
+        raw_dir = (gdict.get("direction") or "").upper()
+        raw_msg_type = (gdict.get("msg_type") or "Q931_EVENT").upper()
+        callref = gdict.get("callref")
+        pd = gdict.get("pd")
 
         # Normalize direction
         direction = DirectionEnum.UNKNOWN
-        if "RX" in raw_dir or "<-" in raw_dir:
+        if "RX" in raw_dir or "<-" in raw_dir or "INBOUND" in raw_dir:
             direction = DirectionEnum.INBOUND
-        elif "TX" in raw_dir or "->" in raw_dir:
+        elif "TX" in raw_dir or "->" in raw_dir or "OUTBOUND" in raw_dir:
             direction = DirectionEnum.OUTBOUND
 
         # Normalize message type
