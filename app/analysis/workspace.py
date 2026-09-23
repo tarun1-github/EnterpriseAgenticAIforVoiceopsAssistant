@@ -77,9 +77,9 @@ class AnalysisWorkspace(BaseModel):
         start_bound = None
         end_bound = None
         if call_session.start_time:
-            start_bound = call_session.start_time - timedelta(seconds=time_window_seconds)
+            start_bound = ensure_utc(call_session.start_time) - timedelta(seconds=time_window_seconds)
         if call_session.end_time:
-            end_bound = call_session.end_time + timedelta(seconds=time_window_seconds)
+            end_bound = ensure_utc(call_session.end_time) + timedelta(seconds=time_window_seconds)
 
         other_call_event_ids = {
             ev.id for s in self.call_sessions if s.session_id != call_session.session_id for ev in s.events
@@ -90,7 +90,8 @@ class AnalysisWorkspace(BaseModel):
             if e.id in session_event_ids:
                 scoped_events.append(e)
             elif time_window_seconds and time_window_seconds > 0 and start_bound and end_bound and e.timestamp:
-                if e.id not in other_call_event_ids and start_bound <= e.timestamp <= end_bound:
+                e_ts = ensure_utc(e.timestamp)
+                if e.id not in other_call_event_ids and start_bound <= e_ts <= end_bound:
                     scoped_events.append(e)
 
         scoped_events.sort(key=lambda ev: (ev.timestamp is None, ensure_utc(ev.timestamp) if ev.timestamp else None))

@@ -72,7 +72,8 @@ class CallSession(BaseModel):
     def duration_seconds(self) -> float:
         """Duration of call in seconds."""
         if self.start_time and self.end_time:
-            delta = (self.end_time - self.start_time).total_seconds()
+            from app.core.timestamps import ensure_utc
+            delta = (ensure_utc(self.end_time) - ensure_utc(self.start_time)).total_seconds()
             return max(0.0, round(delta, 3))
         return 0.0
 

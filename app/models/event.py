@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, Dict, Optional
 from uuid import uuid4
 from pydantic import BaseModel, Field, model_validator
-from app.core.timestamps import parse_cisco_timestamp
+from app.core.timestamps import parse_cisco_timestamp, ensure_utc
 
 
 class ProtocolEnum(str, Enum):
@@ -127,15 +127,16 @@ class VoiceEvent(BaseModel):
             raw_ts = data.get("timestamp_raw") or data.get("timestamp")
             if isinstance(data.get("timestamp"), str):
                 dt, clean_str = parse_cisco_timestamp(data["timestamp"])
-                data["timestamp"] = dt
+                data["timestamp"] = ensure_utc(dt) if dt else None
                 if not data.get("timestamp_raw"):
                     data["timestamp_raw"] = clean_str
             elif isinstance(data.get("timestamp"), datetime):
+                data["timestamp"] = ensure_utc(data["timestamp"])
                 if not data.get("timestamp_raw"):
                     data["timestamp_raw"] = data["timestamp"].isoformat()
             elif raw_ts and isinstance(raw_ts, str):
                 dt, clean_str = parse_cisco_timestamp(raw_ts)
-                data["timestamp"] = dt
+                data["timestamp"] = ensure_utc(dt) if dt else None
                 if not data.get("timestamp_raw"):
                     data["timestamp_raw"] = clean_str
         return data

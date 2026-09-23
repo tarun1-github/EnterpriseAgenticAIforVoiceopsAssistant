@@ -236,7 +236,7 @@ def test_5_original_timestamp_preservation():
     first_ev = events[0]
 
     assert first_ev.timestamp_raw == "15:21:03.100"
-    assert first_ev.timestamp == datetime(2026, 9, 20, 15, 21, 3, 100000)
+    assert first_ev.timestamp == datetime(2026, 9, 20, 15, 21, 3, 100000, tzinfo=timezone.utc)
 
 
 def test_6_and_7_and_8_call_filtering():
@@ -508,3 +508,48 @@ def test_22_architecture_derived_from_evidence():
     arch_2 = detect_call_architecture(call_2.events, sessions=[call_2])
     assert "ISDN PRI" not in arch_2.architecture_name
     assert "Voice Gateway" in arch_2.architecture_name
+
+
+def test_24_offset_naive_and_aware_timestamp_safe_scoping():
+    """Ensure create_call_scoped_workspace never fails with TypeError on mixed aware/naive timestamps."""
+    aware_ts = datetime(2026, 9, 20, 15, 42, 18, 0, tzinfo=timezone.utc)
+    naive_ts = datetime(2026, 9, 20, 15, 42, 18, 500000)
+
+    e1 = VoiceEvent(
+        protocol=ProtocolEnum.CUCM,
+        message_type="CcSetupReq",
+        timestamp=aware_ts,
+        calling_number="1234",
+        raw="CcSetupReq",
+    )
+    e2 = VoiceEvent(
+        protocol=ProtocolEnum.SIP,
+        message_type="INVITE",
+        timestamp=naive_ts,
+        calling_number="1234",
+        raw="INVITE",
+    )
+    e3 = VoiceEvent(
+        protocol=ProtocolEnum.ISDN,
+        message_type="SETUP",
+        raw="SETUP",
+    )
+    object.__setattr__(e3, "timestamp", naive_ts)
+
+    session = CallSession(
+        session_id="call_test_mixed_tz",
+        calling_number="1234",
+        start_time=aware_ts,
+        end_time=aware_ts,
+        events=[e1],
+    )
+    object.__setattr__(session, "start_time", naive_ts)
+
+    ws = AnalysisWorkspace(
+        events=[e1, e2, e3],
+        call_sessions=[session],
+    )
+
+    scoped = ws.create_call_scoped_workspace(session, time_window_seconds=5.0)
+    assert len(scoped.events) >= 1
+

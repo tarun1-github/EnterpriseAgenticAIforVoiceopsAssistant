@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from app.models.event import VoiceEvent, ProtocolEnum
 
 
-from app.core.timestamps import to_ist_display
+from app.core.timestamps import to_ist_display, ensure_utc
 
 
 class SDLObservation(BaseModel):
@@ -265,7 +265,7 @@ def calculate_timing_deltas(events: List[VoiceEvent]) -> List[TimingDelta]:
     """
     deltas: List[TimingDelta] = []
     timed_events = [e for e in events if e.timestamp and e.message_type]
-    timed_events.sort(key=lambda e: e.timestamp)
+    timed_events.sort(key=lambda e: ensure_utc(e.timestamp))
 
     if len(timed_events) < 2:
         return deltas
@@ -278,8 +278,8 @@ def calculate_timing_deltas(events: List[VoiceEvent]) -> List[TimingDelta]:
     ok_ev = next((e for e in timed_events if "200" in e.message_type or "CONNECT" in e.message_type.upper()), None)
 
     # 1. SETUP -> CRCX
-    if setup_ev and crcx_ev and crcx_ev.timestamp >= setup_ev.timestamp:
-        d_ms = round((crcx_ev.timestamp - setup_ev.timestamp).total_seconds() * 1000.0, 1)
+    if setup_ev and crcx_ev and ensure_utc(crcx_ev.timestamp) >= ensure_utc(setup_ev.timestamp):
+        d_ms = round((ensure_utc(crcx_ev.timestamp) - ensure_utc(setup_ev.timestamp)).total_seconds() * 1000.0, 1)
         deltas.append(
             TimingDelta(
                 from_event=f"ISDN {setup_ev.message_type}",
@@ -294,14 +294,14 @@ def calculate_timing_deltas(events: List[VoiceEvent]) -> List[TimingDelta]:
         )
 
     # 2. CRCX -> SIP INVITE
-    if crcx_ev and invite_ev and invite_ev.timestamp >= crcx_ev.timestamp:
-        d_ms = round((invite_ev.timestamp - crcx_ev.timestamp).total_seconds() * 1000.0, 1)
+    if crcx_ev and invite_ev and ensure_utc(invite_ev.timestamp) >= ensure_utc(crcx_ev.timestamp):
+        d_ms = round((ensure_utc(invite_ev.timestamp) - ensure_utc(crcx_ev.timestamp)).total_seconds() * 1000.0, 1)
         deltas.append(
             TimingDelta(
                 from_event=f"MGCP {crcx_ev.message_type}",
                 to_event=f"SIP {invite_ev.message_type}",
-                from_time_str=crcx_ev.timestamp.strftime("%H:%M:%S.%f")[:-3],
-                to_time_str=invite_ev.timestamp.strftime("%H:%M:%S.%f")[:-3],
+                from_time_str=invite_ev.timestamp.strftime("%H:%M:%S.%f")[:-3],
+                to_time_str=crcx_ev.timestamp.strftime("%H:%M:%S.%f")[:-3],
                 delta_ms=d_ms,
                 is_suspicious=d_ms > 1500.0,
                 threshold_ms=1500.0,
@@ -310,8 +310,8 @@ def calculate_timing_deltas(events: List[VoiceEvent]) -> List[TimingDelta]:
         )
 
     # 3. SIP INVITE -> 180 Ringing
-    if invite_ev and ringing_ev and ringing_ev.timestamp >= invite_ev.timestamp:
-        d_ms = round((ringing_ev.timestamp - invite_ev.timestamp).total_seconds() * 1000.0, 1)
+    if invite_ev and ringing_ev and ensure_utc(ringing_ev.timestamp) >= ensure_utc(invite_ev.timestamp):
+        d_ms = round((ensure_utc(ringing_ev.timestamp) - ensure_utc(invite_ev.timestamp)).total_seconds() * 1000.0, 1)
         deltas.append(
             TimingDelta(
                 from_event=f"SIP {invite_ev.message_type}",
@@ -326,8 +326,8 @@ def calculate_timing_deltas(events: List[VoiceEvent]) -> List[TimingDelta]:
         )
 
     # 4. SIP INVITE -> 200 OK / Connect
-    if invite_ev and ok_ev and ok_ev.timestamp >= invite_ev.timestamp:
-        d_ms = round((ok_ev.timestamp - invite_ev.timestamp).total_seconds() * 1000.0, 1)
+    if invite_ev and ok_ev and ensure_utc(ok_ev.timestamp) >= ensure_utc(invite_ev.timestamp):
+        d_ms = round((ensure_utc(ok_ev.timestamp) - ensure_utc(invite_ev.timestamp)).total_seconds() * 1000.0, 1)
         deltas.append(
             TimingDelta(
                 from_event=f"SIP {invite_ev.message_type}",
@@ -346,7 +346,7 @@ def calculate_timing_deltas(events: List[VoiceEvent]) -> List[TimingDelta]:
         for i in range(min(5, len(timed_events) - 1)):
             e1 = timed_events[i]
             e2 = timed_events[i + 1]
-            d_ms = round((e2.timestamp - e1.timestamp).total_seconds() * 1000.0, 1)
+            d_ms = round((ensure_utc(e2.timestamp) - ensure_utc(e1.timestamp)).total_seconds() * 1000.0, 1)
             deltas.append(
                 TimingDelta(
                     from_event=f"{e1.protocol.value} {e1.message_type}",

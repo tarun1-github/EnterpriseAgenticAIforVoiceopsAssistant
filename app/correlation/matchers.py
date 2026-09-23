@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
+from app.core.timestamps import ensure_utc
 from app.models.call_session import CallArchitecture
 from app.models.event import ProtocolEnum, VoiceEvent
 
@@ -77,7 +78,7 @@ def extract_session_identifiers(events: List[VoiceEvent]) -> Dict[str, Any]:
             called_number = e.called_number
 
         if e.timestamp:
-            valid_timestamps.append(e.timestamp)
+            valid_timestamps.append(ensure_utc(e.timestamp))
 
     start_time = min(valid_timestamps) if valid_timestamps else None
     end_time = max(valid_timestamps) if valid_timestamps else None
